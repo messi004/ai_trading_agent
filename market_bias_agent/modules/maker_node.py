@@ -36,6 +36,10 @@ from core.logger import get_logger
 
 log = get_logger(__name__)
 
+
+class MakerOutputError(Exception):
+    """Raised when the LLM output fails schema validation (not cached)."""
+
 MAKER_SYSTEM_PROMPT = """You are an institutional Nifty 50 index-options analyst.
 
 You are given live mathematical features (PCR, OI velocity, spot vs levels,
@@ -52,9 +56,10 @@ Return STRICT JSON only (no markdown, no commentary) with this exact schema:
   "rationale": "short reasoning string",
   "trap_type": "BULL_TRAP" | "BEAR_TRAP" | "BREAKOUT" | "NONE"
 }
-Rules: sl and target are in INDEX POINTS (not %). target must be positive.
-Never invent levels far from the given spot. Be conservative: NEUTRAL is
-valid when confluence is weak."""
+Rules: sl and target are RISK DISTANCES in index points measured from the
+entry mid-point (scalp example: sl=4, target=6). Do NOT output absolute
+index price levels. target must be positive. Never invent levels far from
+the given spot. Be conservative: NEUTRAL is valid when confluence is weak."""
 
 
 def _memory_context_text(memory_context: dict[str, Any] | None) -> str:
@@ -158,7 +163,7 @@ class MakerNode:
             result = cached_maker_output(
                 self._cache,
                 features,
-                lambda: self._call_llm(features, memory_context),
+                lambda: self._cached_producer(features, memory_context),
             )
         except Exception as exc:  # noqa: BLE001 - never let the maker crash the tick path
             log.error("maker_llm_error", extra={"error": str(exc)})
@@ -178,6 +183,15 @@ class MakerNode:
     # ------------------------------------------------------------------
     # LLM path
     # ------------------------------------------------------------------
+    def _cached_producer(
+        self, features: dict[str, Any], memory_context: dict[str, Any] | None
+    ) -> MakerParseResult:
+        """Call the LLM and raise when the output is invalid so it is not cached."""
+        result = self._call_llm(features, memory_context)
+        if isinstance(result, MakerParseResult) and result.parsed is None:
+            raise MakerOutputError(result.error)
+        return result
+
     def _call_llm(
         self, features: dict[str, Any], memory_context: dict[str, Any] | None
     ) -> MakerParseResult:
@@ -194,7 +208,7 @@ class MakerNode:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=enforce_temperature(self._settings.llm_temperature),
-                max_tokens=400,
+                max_tokens=2000,
             )
             raw = response.choices[0].message.content or ""
             usage = getattr(response, "usage", None)
