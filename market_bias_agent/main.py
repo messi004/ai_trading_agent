@@ -28,6 +28,9 @@ from core.strikes_manager import StrikesManager
 from core.tick_pipeline import TickPipeline
 from core.tick_validator import TickValidator
 from core.websocket_client import BreezeWebSocketClient
+from graph.workflow import SignalWorkflow
+from modules.checker_node import CheckerNode
+from modules.maker_node import MakerNode
 from modules.monitoring import MonitoringService, status_page
 from modules.premarket_engine import PreMarketEngine
 
@@ -39,6 +42,10 @@ health = HealthRegistry(settings)
 monitoring = MonitoringService(settings, health, audit_writer=redis_mgr.push_audit)
 premarket = PreMarketEngine(settings, redis_mgr)
 scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+
+maker_node = MakerNode(settings)
+checker_node = CheckerNode(settings)
+workflow = SignalWorkflow(settings, maker=maker_node, checker=checker_node)
 
 
 def _run_eod() -> None:
@@ -183,6 +190,35 @@ def ops_watchdog() -> dict:
 def ops_daily_report() -> dict:
     """Build the daily ops report (Telegram text preview)."""
     return {"report": monitoring.build_daily_report(), "sent": False}
+
+
+@app.get("/test-signal")
+async def test_signal() -> dict:
+    """Run the full maker->checker workflow on a synthetic tick snapshot."""
+    spot = 0.0
+    levels = premarket.last_result or _premarket_from_redis()
+    if isinstance(levels, dict):
+        spot = float(levels.get("spot") or spot)
+    features = {
+        "spot": spot,
+        "pcr": 1.05,
+        "total_call_oi": 2500000.0,
+        "total_put_oi": 2625000.0,
+        "call_oi_vel_1m": 12500.0,
+        "put_oi_vel_1m": -4300.0,
+        "call_oi_vel_5m": 61200.0,
+        "put_oi_vel_5m": -9800.0,
+        "atr": 40.0,
+        "strike": spot or 23500.0,
+        "near_level": 23500.0,
+        "trigger_type": "SCALP",
+        "volatility": "ACTIVE",
+        "volume_delta_1m": 14500.0,
+    }
+    decision = await workflow.invoke(features)
+    decision["llm_budget_remaining"] = workflow.maker().budget().remaining
+    decision["llm_cached"] = bool(workflow.maker().cache().size)
+    return decision
 
 
 def main() -> None:

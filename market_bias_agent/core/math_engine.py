@@ -365,3 +365,31 @@ def sliding_window(series: Sequence[float], window: int = 30) -> list[float]:
     """Keep the last `window` values (Redis sliding window helper)."""
     values = list(series)
     return values[-window:]
+
+
+def metrics_from_features(features: dict) -> OIMetrics:
+    """Build an OIMetrics snapshot from a live feature dict.
+
+    Accepts the feature dict shape used by the memory/pipeline layer
+    (pcr, total_call_oi, call_oi_vel_1m, velocity_5m, ...) with sensible
+    defaults so the Checker's PCR / unwind rules stay evaluable.
+    """
+    total_call = float(features.get("total_call_oi", 0.0))
+    total_put = float(features.get("total_put_oi", 0.0))
+    pcr = float(features.get("pcr", 1.0))
+    call_vel_1m = float(features.get("call_oi_vel_1m", 0.0))
+    put_vel_1m = float(features.get("put_oi_vel_1m", 0.0))
+    call_vel_5m = float(features.get("call_oi_vel_5m", float(features.get("velocity_5m", 0.0))))
+    put_vel_5m = float(features.get("put_oi_vel_5m", float(features.get("velocity_5m", 0.0))))
+    if pcr <= 0 and total_call > 0:
+        pcr = total_put / total_call if total_call else 1.0
+    return OIMetrics(
+        pcr=pcr,
+        total_call_oi=total_call,
+        total_put_oi=total_put,
+        call_velocity_1m=call_vel_1m,
+        put_velocity_1m=put_vel_1m,
+        call_velocity_5m=call_vel_5m,
+        put_velocity_5m=put_vel_5m,
+        max_call_unwind_1m=max(-call_vel_1m, 0.0),
+    )
