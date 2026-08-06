@@ -33,6 +33,8 @@ COPY --from=builder /install /usr/local
 
 COPY . .
 
+RUN mkdir -p /app/data && chown -R agent:agent /app/data
+
 USER agent
 
 EXPOSE 8080
