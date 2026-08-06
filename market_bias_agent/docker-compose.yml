@@ -5,8 +5,6 @@ services:
     image: redis:7-alpine
     container_name: agent_redis
     restart: always
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction --requirepass ${REDIS_PASSWORD:-}
@@ -36,7 +34,7 @@ services:
     volumes:
       - .:/app
     ports:
-      - "8080:8080"
+      - "8090:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 30s
