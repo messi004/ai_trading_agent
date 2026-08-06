@@ -47,6 +47,8 @@ def test_missing_required_secret_raises(monkeypatch) -> None:
         "TELEGRAM_ALERT_CHAT_ID",
     ):
         monkeypatch.delenv(key, raising=False)
+    # Don't let the local .env re-populate secrets behind the test's back.
+    monkeypatch.setattr("config.settings._load_env_file", lambda: None)
     with pytest.raises(ConfigError):
         get_settings.cache_clear()
         get_settings()

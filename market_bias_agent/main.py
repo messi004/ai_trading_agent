@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from config.constants import (
     EOD_CRON_HOUR_IST,
@@ -77,6 +77,8 @@ signal_engine = SignalEngine(
     health=health,
 )
 
+pipeline: TickPipeline | None = None
+
 
 def _run_eod() -> None:
     try:
@@ -114,6 +116,7 @@ def _start_cron() -> None:
 
 async def _start_pipeline() -> None:
     """Phase 1: strikes sync + resilient websocket feed -> tick pipeline."""
+    global pipeline
     validator = TickValidator()
     pipeline = TickPipeline(
         settings, redis_mgr, validator, health=health, signal_engine=signal_engine
@@ -234,6 +237,42 @@ def ops_daily_report() -> dict:
     if stats["bias_correction"]:
         report += "\nBias corrections:\n" + "\n".join(f"  - {s}" for s in stats["bias_correction"])
     return {"report": report, "sent": False}
+
+
+@app.post("/ops/ingest-tick")
+def ops_ingest_tick(payload: dict) -> dict:
+    """Push tick(s) through the live pipeline (validate -> redis -> signal engine).
+
+    Accepts a single tick dict or {"ticks": [tick, ...]}. Used for offline
+    replay/tests when the market feed is closed.
+    """
+    ticks = payload.get("ticks", payload)
+    if not isinstance(ticks, list):
+        raise HTTPException(status_code=400, detail="expected a tick dict or {'ticks': [...]}")
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="pipeline not started yet")
+    accepted = dropped = errors = 0
+    for raw in ticks:
+        if not isinstance(raw, dict):
+            errors += 1
+            continue
+        try:
+            tick = pipeline.process(raw)
+        except Exception as exc:  # noqa: BLE001 - never let replay break ingestion
+            errors += 1
+            log.error("ingest_tick_failed", extra={"error": str(exc)})
+            continue
+        if tick is None:
+            dropped += 1
+        else:
+            accepted += 1
+    return {
+        "accepted": accepted,
+        "dropped": dropped,
+        "errors": errors,
+        "validation_stats": vars(pipeline.stats),
+        "signal_engine": signal_engine.stats(),
+    }
 
 
 @app.get("/test-signal")
