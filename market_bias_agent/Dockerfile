@@ -24,7 +24,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd -r agent && useradd -r -g agent agent \
+RUN groupadd -r -g 1000 agent && useradd -r -u 1000 -g agent agent \
     && apt-get update \
     && apt-get install -y --no-install-recommends tzdata curl \
     && rm -rf /var/lib/apt/lists/*
