@@ -23,11 +23,13 @@ class TickPipeline:
         redis: RedisManager,
         validator: TickValidator,
         health: Any = None,
+        signal_engine: Any = None,
     ) -> None:
         self._settings = settings
         self._redis = redis
         self._validator = validator
         self._health = health
+        self._signal_engine = signal_engine
 
     def process(self, raw: dict) -> Tick | None:
         """Validate and persist a raw tick. Returns the canonical Tick or None."""
@@ -60,6 +62,12 @@ class TickPipeline:
                 self._redis.push_put_oi(tick.strike, tick.oi)
             else:
                 log.warning("unknown_option_type", extra={"option_type": tick.option_type})
+
+        if self._signal_engine is not None:
+            try:
+                self._signal_engine.on_tick(record)
+            except Exception as exc:  # noqa: BLE001 - the engine must never break ingestion
+                log.error("signal_engine_tick_failed", extra={"error": str(exc)})
         return tick
 
     @property

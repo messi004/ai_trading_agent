@@ -29,23 +29,53 @@ from core.tick_pipeline import TickPipeline
 from core.tick_validator import TickValidator
 from core.websocket_client import BreezeWebSocketClient
 from graph.workflow import SignalWorkflow
+from memory.memory_service import MemoryService, build_memory_service
 from modules.checker_node import CheckerNode
 from modules.maker_node import MakerNode
 from modules.monitoring import MonitoringService, status_page
+from modules.paper_trader import PaperTrader
+from modules.post_analysis import PostAnalysisEngine
 from modules.premarket_engine import PreMarketEngine
+from modules.signal_engine import SignalEngine
+from utils.telegram_bot import TelegramBot
 
 log = get_logger(__name__)
 
 settings = get_settings()
 redis_mgr = RedisManager(settings)
 health = HealthRegistry(settings)
-monitoring = MonitoringService(settings, health, audit_writer=redis_mgr.push_audit)
 premarket = PreMarketEngine(settings, redis_mgr)
 scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 
 maker_node = MakerNode(settings)
 checker_node = CheckerNode(settings)
 workflow = SignalWorkflow(settings, maker=maker_node, checker=checker_node)
+
+telegram = TelegramBot(settings)
+monitoring = MonitoringService(
+    settings, health, telegram=telegram, checker=checker_node, audit_writer=redis_mgr.push_audit
+)
+
+memory_service: MemoryService | None = None
+try:
+    memory_service = build_memory_service(settings)
+except Exception as exc:  # noqa: BLE001 - Qdrant may be down at boot; memory stays offline
+    log.warning("memory_boot_fallback", extra={"error": str(exc)})
+    memory_service = build_memory_service(settings, force_memory=True)
+
+post_analysis = PostAnalysisEngine(settings, memory=memory_service)
+paper_trader = PaperTrader(settings)
+
+signal_engine = SignalEngine(
+    settings,
+    workflow,
+    redis_mgr,
+    post_analysis=post_analysis,
+    paper_trader=paper_trader,
+    telegram=telegram,
+    memory=memory_service,
+    health=health,
+)
 
 
 def _run_eod() -> None:
@@ -85,7 +115,9 @@ def _start_cron() -> None:
 async def _start_pipeline() -> None:
     """Phase 1: strikes sync + resilient websocket feed -> tick pipeline."""
     validator = TickValidator()
-    pipeline = TickPipeline(settings, redis_mgr, validator, health=health)
+    pipeline = TickPipeline(
+        settings, redis_mgr, validator, health=health, signal_engine=signal_engine
+    )
 
     strikes_mgr = StrikesManager(settings, redis_mgr, build_strikes_provider(settings))
     try:
@@ -124,6 +156,7 @@ async def lifespan(app: FastAPI):
         )
     except Exception as exc:  # noqa: BLE001
         log.error("redis_connect_failed", extra={"error": str(exc)})
+    workflow.build()
     pipeline_task = asyncio.create_task(_start_pipeline())
     _start_cron()
     try:
@@ -167,6 +200,7 @@ def status() -> dict:
     page["redis_memory_bytes"] = redis_memory
     page["redis_keys"] = redis_keys
     page["premarket_levels"] = premarket.last_result or _premarket_from_redis()
+    page["signal_engine"] = signal_engine.stats()
     return page
 
 
@@ -189,7 +223,17 @@ def ops_watchdog() -> dict:
 @app.get("/ops/daily-report")
 def ops_daily_report() -> dict:
     """Build the daily ops report (Telegram text preview)."""
-    return {"report": monitoring.build_daily_report(), "sent": False}
+    report = monitoring.build_daily_report()
+    stats = signal_engine.stats()
+    report += (
+        "\n"
+        f"Paper: {stats['paper_trader']['positions_opened']} trades | "
+        f"closed {stats['paper_trader']['closed']} | "
+        f"PnL {stats['paper_trader']['total_pnl_points']:+.1f} pts"
+    )
+    if stats["bias_correction"]:
+        report += "\nBias corrections:\n" + "\n".join(f"  - {s}" for s in stats["bias_correction"])
+    return {"report": report, "sent": False}
 
 
 @app.get("/test-signal")

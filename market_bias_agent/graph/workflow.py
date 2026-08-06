@@ -68,6 +68,14 @@ class SignalWorkflow:
             )
         return self._run(features, memory_context)
 
+    def run_sync(
+        self,
+        features: dict[str, Any],
+        memory_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Synchronous variant for the hot tick path (blocks on the LLM call)."""
+        return self._run(features, memory_context)
+
     # ------------------------------------------------------------------
     # Pipeline (sync, dependency-light)
     # ------------------------------------------------------------------

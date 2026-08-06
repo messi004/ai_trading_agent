@@ -77,6 +77,9 @@ class PostAnalysisEngine:
     def approve(self, signal_id: str) -> None:
         self._store.mark_approved(signal_id)
 
+    def signal_count(self) -> int:
+        return self._store.count()
+
     def monitor(self, signal_id: str, entry_fill: float) -> None:
         self._store.mark_monitoring(signal_id, entry_fill)
 

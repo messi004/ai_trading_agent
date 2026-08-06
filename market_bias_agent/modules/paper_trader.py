@@ -55,9 +55,19 @@ class PaperTrader:
     def submit_signal(self, signal: dict[str, Any]) -> str:
         """Open a paper position from a signal dict."""
         direction = str(signal.get("direction", "")).upper()
-        if direction not in ("LONG", "SHORT"):
-            raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
-        entry_alert = float(signal["entry"])
+        if direction in ("BULLISH", "LONG"):
+            direction = "LONG"
+        elif direction in ("BEARISH", "SHORT"):
+            direction = "SHORT"
+        else:
+            raise ValueError(f"direction must be LONG/SHORT, got {direction!r}")
+        if "entry" in signal and signal.get("entry"):
+            entry_alert = float(signal["entry"])
+        else:
+            zone = signal.get("entry_zone")
+            if not zone:
+                raise ValueError("signal needs an entry or entry_zone")
+            entry_alert = float((float(zone[0]) + float(zone[1])) / 2.0)
         entry_fill = self._cost.fill_price(entry_alert, direction)
         position = PaperPosition(
             signal_id=str(signal.get("signal_id") or uuid.uuid4().hex),
