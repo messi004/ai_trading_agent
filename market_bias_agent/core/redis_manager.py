@@ -14,12 +14,14 @@ from config.constants import (
     AUDIT_TRAIL_KEY,
     EXPIRY_ROLLOVER_KEY,
     KEY_CALL_OI_PREFIX,
+    KEY_PRE_MARKET_LEVELS,
     KEY_PUT_OI_PREFIX,
     KEY_RAW_TICK_STREAM,
     KEY_SPOT_TICKS,
     KEY_STRIKES,
     OI_BUFFER_TTL_SECONDS,
     OI_WINDOW_INTERVALS,
+    PRE_MARKET_LEVELS_TTL_SECONDS,
     SPOT_TICK_BUFFER_SIZE,
     STREAM_MAXLEN,
 )
@@ -157,6 +159,24 @@ class RedisManager:
     def get_active_expiry(self) -> str | None:
         assert self.client is not None
         return cast(str | None, self.client.get(EXPIRY_ROLLOVER_KEY))
+
+    # ------------------------------------------------------------------
+    # Pre-market levels (Phase 6): next-day S/R + max pain zones
+    # ------------------------------------------------------------------
+    def set_pre_market_levels(
+        self, levels: dict[str, Any], ttl_seconds: int = PRE_MARKET_LEVELS_TTL_SECONDS
+    ) -> None:
+        """Persist next-day S/R + max-pain zones for the live intraday engine."""
+        assert self.client is not None
+        self.client.set(KEY_PRE_MARKET_LEVELS, json.dumps(levels, default=str))
+        self.client.expire(KEY_PRE_MARKET_LEVELS, ttl_seconds)
+
+    def get_pre_market_levels(self) -> dict[str, Any] | None:
+        assert self.client is not None
+        raw = cast(str | None, self.client.get(KEY_PRE_MARKET_LEVELS))
+        if raw is None:
+            return None
+        return cast(dict[str, Any], json.loads(raw))
 
     # ------------------------------------------------------------------
     # Memory monitoring (Phase 7)

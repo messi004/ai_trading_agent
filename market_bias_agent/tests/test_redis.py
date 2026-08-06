@@ -48,3 +48,15 @@ def test_oi_window_sliding() -> None:
 def test_last_tick_age_when_empty() -> None:
     mgr, _ = _make_manager()
     assert mgr.last_tick_age_seconds() is None
+
+
+def test_pre_market_levels_roundtrip() -> None:
+    mgr, _ = _make_manager()
+    levels = {"pivot": 24000.0, "r1": 24200.0, "max_pain": {"strike": 24100}}
+    mgr.set_pre_market_levels(levels)
+    assert mgr.get_pre_market_levels() == levels
+
+
+def test_pre_market_levels_missing_returns_none() -> None:
+    mgr, _ = _make_manager()
+    assert mgr.get_pre_market_levels() is None

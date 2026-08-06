@@ -222,6 +222,14 @@ MARKET_OPEN_IST = "09:15"
 MARKET_CLOSE_IST = "15:30"
 
 # ---------------------------------------------------------------------------
+# Pre-market engine (PRD Module 6)
+# ---------------------------------------------------------------------------
+KEY_PRE_MARKET_LEVELS = "premarket_levels"
+PRE_MARKET_LEVELS_TTL_SECONDS = 12 * 3600  # survives the next trading day
+MAX_PAIN_PINNING_TOLERANCE = 12.0  # |spot - max_pain| band used by live engine
+S_R_LEVEL_ROUND_BASE = 100  # psychological level spacing (24000, 24100, ...)
+
+# ---------------------------------------------------------------------------
 # Trigger threshold profiles (scaled from PRD baseline)
 # ---------------------------------------------------------------------------
 TRIGGER_PROFILES = {

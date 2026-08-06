@@ -9,8 +9,16 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
+from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore[import-untyped]
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 from fastapi import FastAPI
 
+from config.constants import (
+    EOD_CRON_HOUR_IST,
+    EOD_CRON_MINUTE_IST,
+    PREMARKET_CRON_HOUR_IST,
+    PREMARKET_CRON_MINUTE_IST,
+)
 from config.settings import ConfigError, get_settings
 from core.feed_factory import build_strikes_provider, build_transport
 from core.health import HealthRegistry
@@ -21,6 +29,7 @@ from core.tick_pipeline import TickPipeline
 from core.tick_validator import TickValidator
 from core.websocket_client import BreezeWebSocketClient
 from modules.monitoring import MonitoringService, status_page
+from modules.premarket_engine import PreMarketEngine
 
 log = get_logger(__name__)
 
@@ -28,6 +37,42 @@ settings = get_settings()
 redis_mgr = RedisManager(settings)
 health = HealthRegistry(settings)
 monitoring = MonitoringService(settings, health, audit_writer=redis_mgr.push_audit)
+premarket = PreMarketEngine(settings, redis_mgr)
+scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+
+
+def _run_eod() -> None:
+    try:
+        from modules.eod_engine import EODEngine
+
+        EODEngine(settings).run()
+        health.record_cron_success("eod")
+    except Exception as exc:  # noqa: BLE001
+        log.error("eod_cron_failed", extra={"error": str(exc)})
+
+
+def _run_premarket() -> None:
+    try:
+        premarket.run()
+        health.record_cron_success("premarket")
+    except Exception as exc:  # noqa: BLE001
+        log.error("premarket_cron_failed", extra={"error": str(exc)})
+
+
+def _start_cron() -> None:
+    scheduler.add_job(
+        _run_premarket,
+        CronTrigger(hour=PREMARKET_CRON_HOUR_IST, minute=PREMARKET_CRON_MINUTE_IST),
+        id="premarket",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_eod,
+        CronTrigger(hour=EOD_CRON_HOUR_IST, minute=EOD_CRON_MINUTE_IST),
+        id="eod",
+        replace_existing=True,
+    )
+    scheduler.start()
 
 
 async def _start_pipeline() -> None:
@@ -73,10 +118,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         log.error("redis_connect_failed", extra={"error": str(exc)})
     pipeline_task = asyncio.create_task(_start_pipeline())
+    _start_cron()
     try:
         yield
     finally:
         pipeline_task.cancel()
+        scheduler.shutdown(wait=False)
         redis_mgr.close()
 
 
@@ -112,7 +159,17 @@ def status() -> dict:
     )
     page["redis_memory_bytes"] = redis_memory
     page["redis_keys"] = redis_keys
+    page["premarket_levels"] = premarket.last_result or _premarket_from_redis()
     return page
+
+
+def _premarket_from_redis() -> dict | None:
+    try:
+        if redis_mgr.client is not None:
+            return redis_mgr.get_pre_market_levels()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("premarket_read_failed", extra={"error": str(exc)})
+    return None
 
 
 @app.get("/ops/watchdog")
