@@ -1,0 +1,176 @@
+# 📄 MASTER PRODUCT REQUIREMENT DOCUMENT (PRD) - REVISED V2.0
+**Project Name:** Dual-Engine Institutional AI Trading Agent (Scalping + Intraday + EOD Memory)  
+**Target Asset:** NSE Nifty 50 Index Options & Spot Data  
+**Primary Integration:** ICICI Direct Breeze API (WebSocket + REST)  
+**Deployment Target:** Self-Hosted Linux VPS (Docker Compose: Redis, Qdrant Vector DB, Python Microservices)
+
+---
+
+## 1. EXECUTIVE SYSTEM OVERVIEW & WORKFLOW
+
+The system operates on three parallel execution pipelines:
+1. **Low-Latency Scalping Pipeline (1-Second Ticks via WebSocket):** Tracks Liquidity Sweeps, Sudden OI Unwinding, and Momentum Volatility Spikes.
+2. **Structural Intraday Pipeline (5-Minute Resampled Windows):** Tracks Major Psychological Level Breaks, PCR Velocity, Max Pain Shifts, and Multi-Timeframe Confluence.
+3. **Post-Market & Pre-Market Engine (Daily Cron Jobs):** Processes EOD Institutional Data (FII/PRO vs Retailers), indexes the day's traps into Qdrant Vector DB, and computes Next-Day Support/Resistance levels.
+
+### System Architecture Flow
+[ ICICI Breeze API WebSocket Feed ]
+        │
+        ▼
+[ WebSocket Receiver (Python Async Worker) ] ──(Publishes JSON)──> [ Redis Pub/Sub Stream ]
+        │
+        ▼
+[ LangGraph Feature Engine (Calculates Velocity & Level Interactions) ]
+        │
+        ├─────────────────────────────────────────────────┐
+        ▼                                                 ▼
+[ Trigger: Scalp (1m OI Velocity) ]         [ Trigger: Intraday (Major Level Test) ]
+        │                                                 │
+        └───────────────────────┬─────────────────────────┘
+                                ▼
+[ Qdrant Vector Memory DB (Similarity Search vs Historical Traps) ]
+                                │
+                                ▼
+[ Maker-Checker LLM Brain (Maker: Analyst, Checker: Risk Validator) ]
+                                │
+                                ▼
+[ Telegram Alert Engine (Message + Matplotlib OI Bar Chart Dispatch) ]
+
+[ Daily 18:00 IST Cron ] ──> [ EOD FII/PRO Data Ingestion + Vector Memory Auto-Update ]
+[ Daily 08:30 IST Cron ] ──> [ Pre-Market S/R Calculations for Next-Day Engine ]
+
+---
+
+## 2. SYSTEM MODULES & TECHNICAL SPECIFICATIONS
+
+### Module 1: Data Ingestion & State Storage Engine
+* **Source:** ICICI Direct Breeze API WebSocket.
+* **Stream Pipeline:** Single-threaded async worker parsing incoming ticks to **Redis Stream**.
+* **Redis Data Structures:**
+  * `spot_ticks` (List): Circular buffer holding the last 300 spot ticks.
+  * `call_oi_strike_{strike}` (List): Sliding window holding the last 30 intervals of Call OI.
+  * `put_oi_strike_{strike}` (List): Sliding window holding the last 30 intervals of Put OI.
+
+### Module 2: Mathematical Feature Engine & Rules
+Developer must implement these exact mathematical calculations in Python before triggering the LLM:
+
+1. **Put-Call Ratio (PCR):**
+   PCR = (Total Put Open Interest) / (Total Call Open Interest)
+
+2. **OI Velocity (ΔOI per unit time):**
+   Velocity_1m = OI_current - OI_60s_ago
+   Velocity_5m = OI_current - OI_300s_ago
+
+3. **Level Interaction Formula:**
+   For any round psychological level L (e.g., 23800, 23900, 24000):
+   Condition = | Spot Price - L | <= 12.0 points
+
+4. **Trigger Threshold Matrix:**
+   * **Scalp Trigger:** |Velocity_1m| >= 40,000 contracts OR (Spot crosses L with Volume > 1.5x of 20-MA).
+   * **Intraday Trigger:** Spot enters Level Condition AND |Velocity_5m| >= 150,000 contracts.
+
+### Module 3: Vector Memory Engine (Qdrant)
+* **Embeddings Model:** OpenAI `text-embedding-3-small`.
+* **Payload Structure (JSON):**
+  {
+    "vector_id": "uuid",
+    "timestamp": "ISO-8601 (IST)",
+    "market_state": "PCR: 0.95, Spot: 24005, Call_OI_Vel: -85000",
+    "historical_outcome": "BULL_TRAP_REJECTION",
+    "subsequent_move": "-45 points in 15 mins"
+  }
+
+### Module 4: Maker-Checker Multi-Agent Guardrail System (LangGraph)
+1. **Maker Node (Analyst Agent - `gpt-4o-mini`):**
+   * Input: Mathematical Features + Qdrant Context.
+   * Task: Formulate trade bias (Bullish/Bearish/Trap), target, stop loss.
+2. **Checker Node (Risk Guardrail Agent):**
+   * Rule A: If Scalping Mode, strict SL <= 4 points, Target >= 6 points.
+   * Rule B: If PCR < 0.75, block Long/Bullish signals unless Call Unwinding exceeds 100k.
+   * Rule C: Block duplicates if an alert was sent in the last 120 seconds.
+   * Output: APPROVED or REJECTED.
+
+### Module 5: Telegram Formatting & Visual Dashboard
+* Generate a dynamic `matplotlib` Bar Chart (Call vs Put OI at nearest strikes) in a background thread and push via Telegram `sendPhoto` API.
+
+### Module 6: EOD Post-Market & Next-Day Pre-Market Engine
+* **Execution Schedule:** Cron job executing at 18:00 IST (EOD Analysis) and 08:30 IST (Pre-Market Setup).
+* **EOD Task (Institutional Footprint):**
+  * Fetch Participant-wise Open Interest (FII, PRO, Client) from NSE.
+  * Compute Net Index Futures and Index Options positions (Long vs Short ratio).
+  * Dispatch a structured EOD Institutional Report to Telegram detailing tomorrow's structural bias (e.g., "FIIs written Calls + Retailers Heavy Long = Sell on Rise").
+* **Memory Ingestion Task:**
+  * Extract all high-volatility 1-min & 5-min trap events from the day's Redis buffer and index them into Qdrant Vector DB (`nifty_historical_traps` collection) for auto-learning.
+* **Pre-Market Task (Next-Day Key Levels):**
+  * Calculate dynamic Support, Resistance, and Max Pain Pinning zones for the upcoming trading session and inject them into Redis for the live intraday engine.
+
+---
+
+## 3. PROJECT DIRECTORY STRUCTURE
+market_bias_agent/
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+├── .env
+├── config/
+│   └── settings.py
+├── core/
+│   ├── websocket_client.py
+│   ├── redis_manager.py
+│   └── math_engine.py
+├── memory/
+│   └── vector_store.py
+├── graph/
+│   ├── workflow.py
+│   └── nodes.py
+├── modules/
+│   ├── eod_engine.py
+│   └── premarket_engine.py
+├── utils/
+│   ├── chart_generator.py
+│   └── telegram_bot.py
+└── main.py
+
+---
+
+## 4. DOCKER INFRASTRUCTURE (`docker-compose.yml`)
+```yaml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: agent_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: agent_qdrant
+    restart: always
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  trading_agent:
+    build: .
+    container_name: dual_engine_agent
+    restart: always
+    depends_on:
+      - redis
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Kolkata  # CRITICAL: Force IST timezone in container
+    volumes:
+      - .:/app
+
+volumes:
+  redis_data:
+  qdrant_data:

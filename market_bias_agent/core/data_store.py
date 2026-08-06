@@ -1,0 +1,77 @@
+"""Local historical data store (Enhancement Phase 3).
+
+Stores minute candles as parquet files under a data directory, keyed by
+symbol. Used by the backtest + walk-forward harness and the ingestion script.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+from config.settings import Settings
+from core.candle_engine import Candle
+from core.logger import get_logger
+
+log = get_logger(__name__)
+
+_COLUMNS = ["ts_epoch", "open", "high", "low", "close", "volume"]
+
+
+class DataStore:
+    def __init__(self, settings: Settings, base_dir: str = "data") -> None:
+        self._settings = settings
+        self._base = Path(base_dir)
+
+    def _path_for(self, symbol: str) -> Path:
+        path = self._base / f"{symbol.upper()}_1m.parquet"
+        return path
+
+    def save_candles(self, symbol: str, candles: list[Candle]) -> Path:
+        """Write candles to parquet (append-friendly: replaces the file)."""
+        path = self._path_for(symbol)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not candles:
+            pd.DataFrame(columns=_COLUMNS).to_parquet(path)
+            return path
+        frame = pd.DataFrame(
+            [
+                {
+                    "ts_epoch": c.ts_epoch,
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume,
+                }
+                for c in candles
+            ]
+        )
+        frame = frame.sort_values("ts_epoch").drop_duplicates("ts_epoch", keep="last")
+        frame.to_parquet(path, index=False)
+        log.info("candles_saved", extra={"symbol": symbol, "count": len(frame), "path": str(path)})
+        return path
+
+    def load_candles(self, symbol: str) -> list[Candle]:
+        """Load all candles for a symbol (empty if file missing)."""
+        path = self._path_for(symbol)
+        if not path.exists():
+            return []
+        frame = pd.read_parquet(path)
+        frame = frame.sort_values("ts_epoch")
+        candles = [
+            Candle(
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5]),
+                ts_epoch=float(row[0]),
+            )
+            for row in frame.itertuples(index=False, name=None)
+        ]
+        return candles
+
+    def candle_count(self, symbol: str) -> int:
+        return len(self.load_candles(symbol))
