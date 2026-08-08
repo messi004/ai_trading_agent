@@ -86,6 +86,7 @@ def _run_eod() -> None:
 
         EODEngine(settings).run()
         health.record_cron_success("eod")
+        monitoring.send_daily_report()
     except Exception as exc:  # noqa: BLE001
         log.error("eod_cron_failed", extra={"error": str(exc)})
 
@@ -236,7 +237,8 @@ def ops_daily_report() -> dict:
     )
     if stats["bias_correction"]:
         report += "\nBias corrections:\n" + "\n".join(f"  - {s}" for s in stats["bias_correction"])
-    return {"report": report, "sent": False}
+    sent = monitoring.send_text(report)
+    return {"report": report, "sent": sent}
 
 
 @app.post("/ops/ingest-tick")

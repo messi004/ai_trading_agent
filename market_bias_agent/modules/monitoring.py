@@ -85,6 +85,10 @@ class MonitoringService:
         log.info("ops_daily_report", extra={"report": report})
         return self._telegram.send_ops(report)
 
+    def send_text(self, text: str) -> bool:
+        log.info("ops_send_text", extra={"report": text})
+        return self._telegram.send_ops(text)
+
     def _rejections_by_rule(self) -> list[tuple[str, int]]:
         counts: dict[str, int] = {}
         for verdict in self._checker.audit_trail(limit=1000) if self._checker else []:
