@@ -101,3 +101,59 @@ def test_report_aggregation() -> None:
     assert report["target_hits"] == 1
     assert report["sl_hits"] == 1
     assert report["total_pnl_points"] < 0
+
+
+def test_premium_tracked_and_used_for_pnl() -> None:
+    trader = _trader()
+    trader.update_premium(24000, "CALL", 95.0)
+    trader.submit_signal(
+        {
+            "signal_id": "s1",
+            "direction": "LONG",
+            "entry": 24000,
+            "sl": 4,
+            "target": 6,
+            "ts_epoch": 0,
+            "strike": 24000,
+            "option_type": "CALL",
+            "entry_premium": 95.0,
+        }
+    )
+    assert trader.latest_premium(24000, "CALL") == 95.0
+    # premium moves up with the underlying -> target exit books premium profit
+    trader.update_premium(24000, "CALL", 104.0)
+    closed = trader.update_price(24010, ts_epoch=60)
+    assert len(closed) == 1
+    assert closed[0].exit_reason == "TARGET_HIT"
+    assert closed[0].entry_premium == 95.0
+    assert closed[0].exit_premium == 104.0
+    assert closed[0].pnl_premium_points == 9.0
+
+
+def test_premium_pnl_skipped_without_exit_tick() -> None:
+    trader = _trader()
+    trader.submit_signal(
+        {
+            "signal_id": "s1",
+            "direction": "SHORT",
+            "entry": 24000,
+            "sl": 4,
+            "target": 6,
+            "ts_epoch": 0,
+            "strike": 24000,
+            "option_type": "PUT",
+            "entry_premium": 60.0,
+        }
+    )
+    # no exit premium tick arrives -> falls back to index points only
+    closed = trader.update_price(23993, ts_epoch=60)
+    assert len(closed) == 1
+    assert closed[0].pnl_premium_points is None
+    assert closed[0].pnl_points is not None
+
+
+def test_update_premium_rejects_bad_contract() -> None:
+    trader = _trader()
+    trader.update_premium(24000, "GAMMA", 10.0)
+    trader.update_premium(24000, "CALL", 0.0)
+    assert trader.latest_premium(24000, "CALL") is None

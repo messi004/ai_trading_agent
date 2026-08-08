@@ -22,7 +22,6 @@ class ConfigError(Exception):
 REQUIRED_SECRETS = (
     "ICICI_API_KEY",
     "ICICI_API_SECRET",
-    "ICICI_SESSION_TOKEN",
     "GEMINI_API_KEY",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_ALERT_CHAT_ID",
@@ -76,6 +75,10 @@ class Settings:
     icici_api_key: str = ""
     icici_api_secret: str = ""
     icici_session_token: str = ""
+    # Optional auto-login credentials (used when no session token is configured)
+    icici_user_id: str = ""
+    icici_password: str = ""
+    icici_date_of_birth: str = ""
     nifty_symbol: str = "NIFTY"
     nifty_expiry: str = "weekly"
 
@@ -150,6 +153,9 @@ def get_settings() -> Settings:
         icici_api_key=_get_str("ICICI_API_KEY"),
         icici_api_secret=_get_str("ICICI_API_SECRET"),
         icici_session_token=_get_str("ICICI_SESSION_TOKEN"),
+        icici_user_id=_get_str("ICICI_USER_ID"),
+        icici_password=_get_str("ICICI_PASSWORD"),
+        icici_date_of_birth=_get_str("ICICI_DATE_OF_BIRTH"),
         nifty_symbol=_get_str("NIFTY_SYMBOL", "NIFTY"),
         nifty_expiry=_get_str("NIFTY_EXPIRY", "weekly"),
         gemini_api_key=_get_str("GEMINI_API_KEY"),

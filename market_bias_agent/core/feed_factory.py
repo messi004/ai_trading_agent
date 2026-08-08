@@ -11,6 +11,7 @@ import asyncio
 from typing import Any
 
 from config.settings import Settings
+from core.breeze_session import BreezeSessionManager
 from core.logger import get_logger
 from core.strikes_manager import StrikesProvider
 from core.websocket_client import WsTransport
@@ -44,17 +45,39 @@ class StubStrikesProvider:
         return ("2000-01-01", [])
 
 
-def build_transport(settings: Settings) -> WsTransport:
-    # TODO(Phase 1): return a BreezeWebSocketTransport wrapping breeze_connect
-    # when credentials are present; otherwise keep the stub.
-    return StubWsTransport()
+def build_transport(settings: Settings, session: BreezeSessionManager | None = None) -> WsTransport:
+    """Real Breeze transport when a session is configured, else the stub.
+
+    The stub keeps the app bootable and testable offline; the real transport
+    is only selected once ICICI session credentials are present.
+    """
+    from core.breeze_providers import BreezeStrikesProvider
+    from core.breeze_transport import BreezeWsTransport
+
+    session = session or BreezeSessionManager(settings)
+    if not session.has_token and not session.has_credentials:
+        return StubWsTransport()
+    strikes_provider = BreezeStrikesProvider(settings, session)
+    return BreezeWsTransport(settings, session, strikes_provider=strikes_provider)
 
 
-def build_snapshot_provider(settings: Settings):
-    # TODO(Phase 1): real Breeze REST snapshot fetch.
-    return StubSnapshotProvider()
+def build_snapshot_provider(settings: Settings, session: BreezeSessionManager | None = None):
+    """Real Breeze REST snapshot provider, else the offline stub."""
+    from core.breeze_providers import BreezeSnapshotProvider
+
+    session = session or BreezeSessionManager(settings)
+    if not session.has_token and not session.has_credentials:
+        return StubSnapshotProvider()
+    return BreezeSnapshotProvider(settings, session)
 
 
-def build_strikes_provider(settings: Settings) -> StrikesProvider:
-    # TODO(Phase 1): real Breeze option chain REST fetch.
-    return StubStrikesProvider()
+def build_strikes_provider(
+    settings: Settings, session: BreezeSessionManager | None = None
+) -> StrikesProvider:
+    """Real Breeze option-chain provider, else the offline stub."""
+    from core.breeze_providers import BreezeStrikesProvider
+
+    session = session or BreezeSessionManager(settings)
+    if not session.has_token and not session.has_credentials:
+        return StubStrikesProvider()
+    return BreezeStrikesProvider(settings, session)

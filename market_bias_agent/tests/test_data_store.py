@@ -44,6 +44,24 @@ def test_save_deduplicates_by_ts(tmp_path) -> None:
     assert loaded[0].close == 2.0
 
 
+def test_save_and_load_oi_series(tmp_path) -> None:
+    store = _store(tmp_path)
+    series = [
+        (0.0, 100_000.0, 95_000.0),
+        (60.0, 120_000.0, 90_000.0),
+        (120.0, 130_000.0, 85_000.0),
+    ]
+    path = store.save_oi_series("NIFTY", series)
+    assert path.exists()
+    loaded = store.load_oi_series("NIFTY")
+    assert loaded == series
+
+
+def test_load_missing_oi_series_returns_empty(tmp_path) -> None:
+    store = _store(tmp_path)
+    assert store.load_oi_series("NIFTY") == []
+
+
 class TestCostModel:
     def test_long_entry_fill_slippage_up(self) -> None:
         cm = CostModel(slippage_points=1.0, cost_per_trade_points=0.5)

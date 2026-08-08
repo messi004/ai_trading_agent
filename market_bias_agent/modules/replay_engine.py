@@ -2,16 +2,22 @@
 
 Replays minute candles through the exact same feature functions used live
 (evaluate_triggers_with_regime, divergence, patterns) so backtest == live.
+
+OI metrics come from a real historical OI series (ingested from Breeze via
+``scripts.ingest_history`` and read through ``core.data_store.DataStore``),
+mirroring the live engine's total-OI + velocity computation.
 """
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from config.constants import SCALP_SL_MAX_POINTS, SCALP_TARGET_MIN_POINTS
 from config.settings import Settings
 from core.candle_engine import Candle, classify_volatility_regime, detect_all_patterns
+from core.data_store import DataStore
 from core.features import classify_oi_price_divergence
 from core.math_engine import OIMetrics, compute_oi_metrics, evaluate_triggers_with_regime
 
@@ -23,42 +29,59 @@ class OIProvider(Protocol):
     def oi_metrics_for_bar(self, index: int, candle: Candle) -> OIMetrics: ...
 
 
-class SyntheticOIProvider:
-    """Deterministic seeded OI so backtests are reproducible without real data.
+class HistoricalOIProvider:
+    """Per-bar OI metrics from a real ingested (ts, call_oi, put_oi) series.
 
-    Occasional large velocity spikes make realistic signals fire.
+    Mirrors the live engine: total OI is the sum across the tracked strikes,
+    and 1m/5m velocity compares the current total against the total sampled
+    60s / 300s earlier. ``series`` is ``[(ts_epoch, total_call_oi,
+    total_put_oi), ...]`` in ascending order, as persisted by
+    :class:`core.data_store.DataStore` from real Breeze history.
     """
 
-    def __init__(
-        self, seed: int = 42, base_call_oi: float = 100_000, base_put_oi: float = 95_000
-    ) -> None:
-        import random
+    def __init__(self, series: list[tuple[float, float, float]]) -> None:
+        if not series:
+            raise ValueError(
+                "HistoricalOIProvider requires a non-empty OI series — "
+                "run `python -m scripts.ingest_history --with-oi` first"
+            )
+        self._ts: list[float] = []
+        self._call: list[float] = []
+        self._put: list[float] = []
+        for ts, call, put in series:
+            self._ts.append(ts)
+            self._call.append(call)
+            self._put.append(put)
 
-        self._rng = random.Random(seed)
-        self._base_call = base_call_oi
-        self._base_put = base_put_oi
-        self._last_call = base_call_oi
-        self._last_put = base_put_oi
+    @classmethod
+    def from_store(cls, store: DataStore, symbol: str) -> HistoricalOIProvider:
+        series = store.load_oi_series(symbol)
+        if not series:
+            raise ValueError(
+                f"no real OI series found for {symbol.upper()} — "
+                "ingest it first via `python -m scripts.ingest_history --with-oi`"
+            )
+        return cls(series)
 
-    def _step(self, last: float) -> float:
-        delta = self._rng.uniform(-15_000, 15_000)
-        if self._rng.random() < 0.03:  # 3% chance of a velocity spike
-            delta += self._rng.choice([-1, 1]) * self._rng.uniform(50_000, 120_000)
-        return max(last + delta, 10_000)
+    def _at_or_before(self, ts: float) -> tuple[float, float]:
+        """Latest (call, put) total at or before ``ts`` (0.0 when none)."""
+        idx = bisect.bisect_right(self._ts, ts) - 1
+        if idx < 0:
+            return 0.0, 0.0
+        return self._call[idx], self._put[idx]
 
     def oi_metrics_for_bar(self, index: int, candle: Candle) -> OIMetrics:
-        call = self._step(self._last_call)
-        put = self._step(self._last_put)
-        metrics = compute_oi_metrics(
+        call, put = self._at_or_before(candle.ts_epoch)
+        call_60, put_60 = self._at_or_before(candle.ts_epoch - 60.0)
+        call_300, put_300 = self._at_or_before(candle.ts_epoch - 300.0)
+        return compute_oi_metrics(
             total_call_oi=call,
             total_put_oi=put,
-            call_oi_60s_ago=self._last_call,
-            call_oi_300s_ago=self._last_call - self._rng.uniform(-30_000, 30_000),
-            put_oi_60s_ago=self._last_put,
-            put_oi_300s_ago=self._last_put - self._rng.uniform(-30_000, 30_000),
+            call_oi_60s_ago=call_60,
+            call_oi_300s_ago=call_300,
+            put_oi_60s_ago=put_60,
+            put_oi_300s_ago=put_300,
         )
-        self._last_call, self._last_put = call, put
-        return metrics
 
 
 def direction_from_divergence(price_change_points: float, oi_change_contracts: float) -> str:

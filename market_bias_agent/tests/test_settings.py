@@ -41,7 +41,6 @@ def test_missing_required_secret_raises(monkeypatch) -> None:
     for key in (
         "ICICI_API_KEY",
         "ICICI_API_SECRET",
-        "ICICI_SESSION_TOKEN",
         "GEMINI_API_KEY",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_ALERT_CHAT_ID",
@@ -52,4 +51,14 @@ def test_missing_required_secret_raises(monkeypatch) -> None:
     with pytest.raises(ConfigError):
         get_settings.cache_clear()
         get_settings()
+    get_settings.cache_clear()
+
+
+def test_session_token_may_be_empty(monkeypatch) -> None:
+    _set_dummy_secrets(monkeypatch)
+    monkeypatch.delenv("ICICI_SESSION_TOKEN", raising=False)
+    monkeypatch.setattr("config.settings._load_env_file", lambda: None)
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.icici_session_token == ""
     get_settings.cache_clear()

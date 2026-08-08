@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
 from core.candle_engine import Candle
 from core.cost_model import CostModel
 from core.math_engine import OIMetrics, compute_oi_metrics
 from modules.backtest_engine import BacktestEngine
-from modules.replay_engine import ReplayEngine, direction_from_divergence
+from modules.replay_engine import HistoricalOIProvider, ReplayEngine, direction_from_divergence
 
 
 class HugeOIProvider:
@@ -161,3 +163,27 @@ def test_walk_forward_splits_windows() -> None:
     assert len(windows) == 3
     assert windows[0]["window"] == 1
     assert all(w["trades"] >= 0 for w in windows)
+
+
+def test_historical_oi_provider_computes_velocity_from_real_series() -> None:
+    """Real OI series -> per-bar metrics using the live 60s/300s lookback."""
+    series = [
+        (0.0, 100_000.0, 95_000.0),
+        (60.0, 120_000.0, 90_000.0),
+        (300.0, 130_000.0, 85_000.0),
+        (360.0, 150_000.0, 80_000.0),
+    ]
+    provider = HistoricalOIProvider(series)
+    bar_0 = Candle(open=1, high=2, low=0, close=1, volume=1, ts_epoch=0.0)
+    bar_360 = Candle(open=1, high=2, low=0, close=1, volume=1, ts_epoch=360.0)
+    m0 = provider.oi_metrics_for_bar(0, bar_0)
+    assert m0.total_call_oi == 100_000.0
+    # at 360s: current 150k, 60s ago (ts=300) 130k -> +20k; 300s ago (ts=60) 120k -> +30k
+    m360 = provider.oi_metrics_for_bar(3, bar_360)
+    assert m360.call_velocity_1m == 20_000.0
+    assert m360.call_velocity_5m == 30_000.0
+
+
+def test_historical_oi_provider_requires_real_data() -> None:
+    with pytest.raises(ValueError):
+        HistoricalOIProvider([])

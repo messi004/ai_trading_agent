@@ -90,12 +90,12 @@ def _spot_tick(price: float, ts: float) -> dict:
     return {"type": "spot", "symbol": "NIFTY", "ts_epoch": ts, "price": price, "volume": 100.0}
 
 
-def _oi_tick(strike: int, otype: str, oi: float, ts: float) -> dict:
+def _oi_tick(strike: int, otype: str, oi: float, ts: float, price: float = 0.0) -> dict:
     return {
         "type": "oi",
         "symbol": "NIFTY",
         "ts_epoch": ts,
-        "price": 0.0,
+        "price": price,
         "volume": 0.0,
         "strike": strike,
         "option_type": otype,
@@ -171,3 +171,29 @@ def test_pipeline_invokes_engine(env) -> None:
     pipeline.process(_spot_tick(23500.0, now))
     pipeline.process(_oi_tick(23500, "CALL", 1_400_000, now))
     assert post.signal_count() == 1
+
+
+def test_engine_books_premium_pnl_on_oi_ticks(env) -> None:
+    redis_mgr, engine, post, trader, telegram, store = env
+    pipeline = TickPipeline(engine._settings, redis_mgr, TickValidator(), signal_engine=engine)
+    _prime_oi(redis_mgr, 1_250_000, 1_300_000, [23500])
+    now = time.time()
+
+    # Feed live premium BEFORE the signal so entry premium is captured.
+    pipeline.process(_oi_tick(23500, "CALL", 1_300_000, now, price=90.0))
+    pipeline.process(_spot_tick(23500.0, now))
+    pipeline.process(_oi_tick(23500, "CALL", 1_400_000, now, price=95.0))
+
+    pos = trader.open_positions()[0]
+    assert pos.strike == 23500
+    assert pos.option_type == "CALL"
+    assert pos.entry_premium == 95.0
+
+    # Premium rises with the underlying -> target exit books premium profit.
+    pipeline.process(_oi_tick(23500, "CALL", 1_400_000, time.time(), price=105.0))
+    pipeline.process(_spot_tick(pos.entry_fill + 10.0, time.time()))
+
+    assert not trader.open_positions()
+    closed = trader.closed_positions()
+    assert closed and closed[0].exit_reason == "TARGET_HIT"
+    assert closed[0].pnl_premium_points == pytest.approx(10.0)

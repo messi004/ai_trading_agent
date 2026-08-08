@@ -154,6 +154,22 @@ STRIKES_RANGE_AROUND_ATM = 20  # strikes to keep each side of ATM
 EXPIRY_ROLLOVER_KEY = "active_expiry_date"
 
 # ---------------------------------------------------------------------------
+# Breeze session maintenance (Enhancement: Telegram session updates)
+# ---------------------------------------------------------------------------
+KEY_BREEZE_SESSION_TOKEN = "breeze_session_token"
+BREEZE_SESSION_TOKEN_TTL_SECONDS = 26 * 3600  # outlive the ~24h token lifetime
+BREEZE_SESSION_REFRESH_INTERVAL_SECONDS = 6 * 3600  # re-login before daily expiry
+BREEZE_SESSION_MAX_AGE_SECONDS = 23 * 3600  # force refresh if older than this
+BREEZE_CUSTOMER_LOGIN_URL = "https://api.icicidirect.com/breezeapi/api/v1/customerlogin"
+SESSION_REFRESH_CRON_HOUR_IST = 8
+SESSION_REFRESH_CRON_MINUTE_IST = 0
+BREEZE_HISTORY_INTERVAL = "1minute"  # historical candle interval for ingest_history
+
+# Telegram session listener (getUpdates long-polling)
+TELEGRAM_GETUPDATES_TIMEOUT = 50  # seconds, matches Bot API long-poll
+TELEGRAM_POLL_INTERVAL_SECONDS = 2.0
+
+# ---------------------------------------------------------------------------
 # Advanced feature engine (Enhancement Phase 2)
 # ---------------------------------------------------------------------------
 # Volume delta (tick rule: up-tick volume = buying pressure)

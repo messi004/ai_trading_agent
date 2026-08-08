@@ -77,6 +77,7 @@ def normalize_tick(raw: dict[str, Any], fallback_epoch: float | None = None) -> 
         type="oi",
         symbol=symbol,
         ts_epoch=ts_epoch,
+        price=_to_float(raw.get("price", 0), "price"),
         strike=int(_to_float(raw.get("strike"), "strike")),
         option_type=str(raw.get("option_type", "")).upper(),
         oi=_to_float(raw.get("oi"), "oi"),

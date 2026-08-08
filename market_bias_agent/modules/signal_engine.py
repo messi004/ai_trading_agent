@@ -97,7 +97,20 @@ class SignalEngine:
         if tick.get("type") == "spot":
             self._spot = float(tick.get("price", self._spot))
             self._handle_spot(tick)
+        elif tick.get("type") == "oi":
+            self._handle_oi(tick)
         self._maybe_evaluate(now)
+
+    def _handle_oi(self, tick: dict[str, Any]) -> None:
+        """Feed the live option premium into the paper trader for PnL."""
+        try:
+            strike = float(tick.get("strike", 0.0) or 0.0)
+            option_type = str(tick.get("option_type", "")).upper()
+            price = float(tick.get("price", 0.0) or 0.0)
+            if strike > 0 and option_type in ("CALL", "PUT") and price > 0:
+                self._trader.update_premium(strike, option_type, price)
+        except Exception as exc:  # noqa: BLE001 - premium bookkeeping never blocks ticks
+            log.warning("premium_feed_failed", extra={"error": str(exc)})
 
     # ------------------------------------------------------------------
     # Feature assembly
@@ -203,6 +216,37 @@ class SignalEngine:
             log.warning("signal_level_read_failed", extra={"error": str(exc)})
         return nearest_round_level(spot)
 
+    def _atm_strike(self, spot: float) -> float:
+        """Nearest tradable strike to the spot from the option chain."""
+        try:
+            strikes = self._redis.get_strikes()
+            if strikes:
+                return float(min(strikes, key=lambda s: abs(float(s) - spot)))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("signal_strike_read_failed", extra={"error": str(exc)})
+        return float(nearest_round_level(spot) or spot)
+
+    def _paper_signal_dict(self, signal: StructuredSignal) -> dict[str, Any]:
+        """Attach the option contract (ATM strike + option type) and entry premium.
+
+        The paper trader resolves SL/Target on the underlying index (as-alerted
+        rules) but books PnL on the live option premium of the ATM contract.
+        """
+        side = signal.side()
+        option_type = "CALL" if side == "LONG" else ("PUT" if side == "SHORT" else "")
+        strike = self._atm_strike(self._spot)
+        entry_premium = self._trader.latest_premium(strike, option_type) if option_type else None
+        if option_type and entry_premium is None:
+            log.info(
+                "signal_no_premium_tick",
+                extra={"strike": strike, "option_type": option_type},
+            )
+        payload = signal.to_dict()
+        payload["strike"] = strike
+        payload["option_type"] = option_type
+        payload["entry_premium"] = entry_premium
+        return payload
+
     # ------------------------------------------------------------------
     # Trigger evaluation (throttled)
     # ------------------------------------------------------------------
@@ -277,7 +321,8 @@ class SignalEngine:
         self._post.approve(signal.signal_id)
 
         entry = signal.entry
-        self._trader.submit_signal(signal.to_dict())
+        signal_dict = self._paper_signal_dict(signal)
+        self._trader.submit_signal(signal_dict)
         self._post.monitor(signal.signal_id, entry)
         log.info(
             "signal_approved",
@@ -342,18 +387,21 @@ class SignalEngine:
             self._close_position(position)
 
     def _close_position(self, position: PaperPosition) -> None:
+        pnl = position.pnl_premium_points if position.pnl_premium_points is not None else (
+            position.pnl_points or 0.0
+        )
         try:
             summary = self._post.record_exit(
                 position.signal_id,
                 exit_price=float(position.exit_price or 0.0),
                 exit_reason=str(position.exit_reason or "TIME_EXIT"),
-                pnl_points=float(position.pnl_points or 0.0),
+                pnl_points=float(pnl),
                 mfe=float(position.mfe),
                 mae=float(position.mae),
                 ts=time.time(),
             )
             self._post.close_and_write_back(position.signal_id)
-            self._workflow.checker().record_exit_pnl(float(position.pnl_points or 0.0))
+            self._workflow.checker().record_exit_pnl(float(pnl))
             self._telegram.send_alert(summary.to_text())
         except Exception as exc:  # noqa: BLE001 - post-trade bookkeeping must not crash ticks
             log.warning(
@@ -364,6 +412,14 @@ class SignalEngine:
     # ------------------------------------------------------------------
     # Introspection for /status and tests
     # ------------------------------------------------------------------
+    def feature_snapshot(self) -> dict[str, Any]:
+        """Current live feature vector (real tick-derived state, no samples).
+
+        Used by the /test-signal diagnostic endpoint so it evaluates the
+        workflow on the actual current market state rather than synthetic data.
+        """
+        return self._build_features(time.time())
+
     def stats(self) -> dict[str, Any]:
         return {
             "paper_trader": self._trader.report(),

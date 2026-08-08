@@ -1,7 +1,9 @@
 """Local historical data store (Enhancement Phase 3).
 
-Stores minute candles as parquet files under a data directory, keyed by
-symbol. Used by the backtest + walk-forward harness and the ingestion script.
+Stores minute candles and per-minute total option OI series as parquet
+files under a data directory, keyed by symbol. Used by the backtest +
+walk-forward harness and the ingestion script. Both files are written
+from real Breeze REST history (never synthetic).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from core.logger import get_logger
 log = get_logger(__name__)
 
 _COLUMNS = ["ts_epoch", "open", "high", "low", "close", "volume"]
+_OI_COLUMNS = ["ts_epoch", "total_call_oi", "total_put_oi"]
 
 
 class DataStore:
@@ -75,3 +78,41 @@ class DataStore:
 
     def candle_count(self, symbol: str) -> int:
         return len(self.load_candles(symbol))
+
+    def _oi_path_for(self, symbol: str) -> Path:
+        return self._base / f"{symbol.upper()}_oi_1m.parquet"
+
+    def save_oi_series(
+        self, symbol: str, series: list[tuple[float, float, float]]
+    ) -> Path:
+        """Persist (ts_epoch, total_call_oi, total_put_oi) rows to parquet."""
+        path = self._oi_path_for(symbol)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not series:
+            pd.DataFrame(columns=_OI_COLUMNS).to_parquet(path)
+            return path
+        frame = pd.DataFrame(
+            [
+                {"ts_epoch": ts, "total_call_oi": call, "total_put_oi": put}
+                for ts, call, put in series
+            ]
+        )
+        frame = frame.sort_values("ts_epoch").drop_duplicates("ts_epoch", keep="last")
+        frame.to_parquet(path, index=False)
+        log.info(
+            "oi_series_saved",
+            extra={"symbol": symbol, "count": len(frame), "path": str(path)},
+        )
+        return path
+
+    def load_oi_series(self, symbol: str) -> list[tuple[float, float, float]]:
+        """Load (ts_epoch, total_call_oi, total_put_oi) rows (empty if missing)."""
+        path = self._oi_path_for(symbol)
+        if not path.exists():
+            return []
+        frame = pd.read_parquet(path)
+        frame = frame.sort_values("ts_epoch")
+        return [
+            (float(row[0]), float(row[1]), float(row[2]))
+            for row in frame.itertuples(index=False, name=None)
+        ]

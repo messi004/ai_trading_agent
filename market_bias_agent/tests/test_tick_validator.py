@@ -29,11 +29,27 @@ def test_normalize_oi_tick() -> None:
             "strike": 24000,
             "option_type": "CALL",
             "oi": 123_456,
+            "price": 95.5,
             "ts_epoch": NOW,
         }
     )
     assert t.option_type == "CALL"
     assert t.oi == 123_456
+    assert t.price == 95.5  # live option premium
+
+
+def test_normalize_oi_tick_defaults_premium_to_zero() -> None:
+    t = normalize_tick(
+        {
+            "type": "oi",
+            "symbol": "NIFTY",
+            "strike": 24000,
+            "option_type": "PUT",
+            "oi": 123_456,
+            "ts_epoch": NOW,
+        }
+    )
+    assert t.price == 0.0
 
 
 def test_normalize_rejects_bad_type() -> None:

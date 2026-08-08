@@ -6,6 +6,7 @@ import pytest
 
 from config.constants import QDRANT_COLLECTION_DIM
 from config.settings import Settings
+from core.participant_oi import ParticipantOIError
 from memory.embeddings import FeatureEmbedder, GeminiEmbedder, get_embedder
 from memory.memory_service import MemoryService, SimilarSituation, build_memory_service
 from memory.trap_records import (
@@ -212,6 +213,14 @@ class TestMemoryService:
 
 
 class TestEODEngine:
+    @staticmethod
+    def _stub_participant():
+        class _Stub:
+            def fetch_latest(self):
+                raise ParticipantOIError("offline test")
+
+        return _Stub()
+
     def test_index_day_traps(self) -> None:
         engine = EODEngine(Settings(), memory=make_service())
         events = [
@@ -247,5 +256,9 @@ class TestEODEngine:
         assert engine.weekly_compact() == 0  # recent data survives (cutoff is 45 days ago)
 
     def test_run_does_not_crash_empty(self) -> None:
-        engine = EODEngine(Settings(), memory=make_service())
-        engine.run()
+        engine = EODEngine(
+            Settings(), memory=make_service(), participant_provider=self._stub_participant()
+        )
+        result = engine.run()
+        assert result["participant_report"]["status"] == "unavailable"
+        assert "traps_indexed" in result

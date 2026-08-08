@@ -20,6 +20,17 @@ log = get_logger(__name__)
 DEFAULT_MAX_HOLD_SECONDS = 900.0
 
 
+def _to_optional_float(raw: Any) -> float | None:
+    """Convert a value to float, tolerating None/empty as None."""
+    if raw is None or raw == "":
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
 @dataclass
 class PaperPosition:
     signal_id: str
@@ -36,6 +47,11 @@ class PaperPosition:
     slippage_points: float = 0.0
     mfe: float = 0.0
     mae: float = 0.0
+    strike: float = 0.0
+    option_type: str = ""  # "CALL" | "PUT"
+    entry_premium: float | None = None
+    exit_premium: float | None = None
+    pnl_premium_points: float | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -51,6 +67,7 @@ class PaperTrader:
         self._max_hold = max_hold_seconds
         self._positions: dict[str, PaperPosition] = {}
         self._closed: list[PaperPosition] = []
+        self._premiums: dict[tuple[float, str], float] = {}
 
     def submit_signal(self, signal: dict[str, Any]) -> str:
         """Open a paper position from a signal dict."""
@@ -78,9 +95,24 @@ class PaperTrader:
             target=float(signal.get("target", 6.0)),
             opened_at=float(signal.get("ts_epoch", 0.0)),
             slippage_points=self._cost.slippage_points,
+            strike=float(signal.get("strike", 0.0) or 0.0),
+            option_type=str(signal.get("option_type", "")).upper(),
+            entry_premium=_to_optional_float(signal.get("entry_premium")),
         )
         self._positions[position.signal_id] = position
         return position.signal_id
+
+    def update_premium(self, strike: float, option_type: str, premium: float) -> None:
+        """Feed the latest option premium for a contract (strike, option_type)."""
+        if premium <= 0:
+            return
+        key = (float(strike), str(option_type).upper())
+        if key[1] not in ("CALL", "PUT"):
+            return
+        self._premiums[key] = float(premium)
+
+    def latest_premium(self, strike: float, option_type: str) -> float | None:
+        return self._premiums.get((float(strike), str(option_type).upper()))
 
     def update_price(self, price: float, ts_epoch: float) -> list[PaperPosition]:
         """Feed a price; resolve fills. Returns positions closed on this tick."""
@@ -126,6 +158,13 @@ class PaperTrader:
         position.pnl_points = self._cost.net_pnl_points(
             position.entry_fill, exit_fill, position.direction
         )
+        if position.entry_premium is not None:
+            exit_premium = self.latest_premium(position.strike, position.option_type)
+            if exit_premium is not None:
+                position.exit_premium = exit_premium
+                position.pnl_premium_points = round(
+                    exit_premium - position.entry_premium, 2
+                )
         self._closed.append(position)
         log.info(
             "paper_trade_closed",
@@ -133,6 +172,7 @@ class PaperTrader:
                 "signal_id": position.signal_id,
                 "reason": reason,
                 "pnl_points": round(position.pnl_points, 2),
+                "pnl_premium_points": round(position.pnl_premium_points or 0.0, 2),
                 "mfe": round(position.mfe, 2),
                 "mae": round(position.mae, 2),
             },
@@ -142,6 +182,11 @@ class PaperTrader:
         """Aggregate stats across closed positions."""
         closed = self._closed
         pnl = [p.pnl_points or 0.0 for p in closed]
+        premium_pnl = [
+            p.pnl_premium_points or 0.0
+            for p in closed
+            if p.pnl_premium_points is not None
+        ]
         wins = sum(1 for p in closed if p.exit_reason == "TARGET_HIT")
         losses = sum(1 for p in closed if p.exit_reason == "SL_HIT")
         return {
@@ -153,5 +198,10 @@ class PaperTrader:
             "time_exits": sum(1 for p in closed if p.exit_reason == "TIME_EXIT"),
             "total_pnl_points": round(sum(pnl), 2),
             "avg_pnl_points": round(sum(pnl) / len(pnl), 2) if pnl else 0.0,
+            "total_pnl_premium_points": round(sum(premium_pnl), 2),
+            "avg_pnl_premium_points": (
+                round(sum(premium_pnl) / len(premium_pnl), 2) if premium_pnl else 0.0
+            ),
+            "premium_trades": len(premium_pnl),
             "hit_rate": round(wins / (wins + losses), 3) if (wins + losses) else 0.0,
         }

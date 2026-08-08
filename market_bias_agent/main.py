@@ -18,9 +18,18 @@ from config.constants import (
     EOD_CRON_MINUTE_IST,
     PREMARKET_CRON_HOUR_IST,
     PREMARKET_CRON_MINUTE_IST,
+    SESSION_REFRESH_CRON_HOUR_IST,
+    SESSION_REFRESH_CRON_MINUTE_IST,
 )
 from config.settings import ConfigError, get_settings
-from core.feed_factory import build_strikes_provider, build_transport
+from core.backfill import BackfillService
+from core.breeze_session import BreezeSessionManager
+from core.feed_factory import (
+    StubWsTransport,
+    build_snapshot_provider,
+    build_strikes_provider,
+    build_transport,
+)
 from core.health import HealthRegistry
 from core.logger import get_logger, setup_logging
 from core.redis_manager import RedisManager
@@ -38,6 +47,7 @@ from modules.post_analysis import PostAnalysisEngine
 from modules.premarket_engine import PreMarketEngine
 from modules.signal_engine import SignalEngine
 from utils.telegram_bot import TelegramBot
+from utils.telegram_listener import build_telegram_listener
 
 log = get_logger(__name__)
 
@@ -46,6 +56,7 @@ redis_mgr = RedisManager(settings)
 health = HealthRegistry(settings)
 premarket = PreMarketEngine(settings, redis_mgr)
 scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+session_mgr = BreezeSessionManager(settings, redis_mgr)
 
 maker_node = MakerNode(settings)
 checker_node = CheckerNode(settings)
@@ -78,13 +89,16 @@ signal_engine = SignalEngine(
 )
 
 pipeline: TickPipeline | None = None
+pipeline_task: asyncio.Task | None = None
+_ws_client: BreezeWebSocketClient | None = None
+_pipeline_lock = asyncio.Lock()
 
 
 def _run_eod() -> None:
     try:
         from modules.eod_engine import EODEngine
 
-        EODEngine(settings).run()
+        EODEngine(settings, memory=memory_service, telegram=telegram).run()
         health.record_cron_success("eod")
         monitoring.send_daily_report()
     except Exception as exc:  # noqa: BLE001
@@ -97,6 +111,14 @@ def _run_premarket() -> None:
         health.record_cron_success("premarket")
     except Exception as exc:  # noqa: BLE001
         log.error("premarket_cron_failed", extra={"error": str(exc)})
+
+
+def _run_session_refresh() -> None:
+    try:
+        if session_mgr.maybe_refresh():
+            log.info("session_refreshed_via_cron")
+    except Exception as exc:  # noqa: BLE001
+        log.error("session_refresh_cron_failed", extra={"error": str(exc)})
 
 
 def _start_cron() -> None:
@@ -112,37 +134,76 @@ def _start_cron() -> None:
         id="eod",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _run_session_refresh,
+        CronTrigger(hour=SESSION_REFRESH_CRON_HOUR_IST, minute=SESSION_REFRESH_CRON_MINUTE_IST),
+        id="session-refresh",
+        replace_existing=True,
+    )
     scheduler.start()
 
 
 async def _start_pipeline() -> None:
     """Phase 1: strikes sync + resilient websocket feed -> tick pipeline."""
-    global pipeline
+    global pipeline, _ws_client
     validator = TickValidator()
     pipeline = TickPipeline(
         settings, redis_mgr, validator, health=health, signal_engine=signal_engine
     )
 
-    strikes_mgr = StrikesManager(settings, redis_mgr, build_strikes_provider(settings))
+    strikes_mgr = StrikesManager(settings, redis_mgr, build_strikes_provider(settings, session_mgr))
     try:
         strikes_mgr.sync_if_due()
     except Exception as exc:  # noqa: BLE001
         log.error("strikes_initial_sync_failed", extra={"error": str(exc)})
 
-    transport = build_transport(settings)
+    transport = build_transport(settings, session=session_mgr)
     ws_client = BreezeWebSocketClient(
         settings,
         transport,
         subscriptions_provider=lambda: [settings.nifty_symbol]
         + [f"STK{s}" for s in redis_mgr.get_strikes()],
     )
+    _ws_client = ws_client
     ws_client.set_tick_handler(pipeline.process)
     ws_client.set_status_callback(health.set_ws)
+    if not isinstance(transport, StubWsTransport):
+        backfill = BackfillService(
+            settings, redis_mgr, build_snapshot_provider(settings, session_mgr)
+        )
+
+        async def _run_backfill() -> None:
+            await backfill.run()
+
+        ws_client.set_backfill_callback(_run_backfill)
     health.set_ws(False, 0)
     try:
         await ws_client.run()
     finally:
         health.set_ws(False, ws_client.reconnect_count)
+        if _ws_client is ws_client:
+            _ws_client = None
+
+
+async def _restart_pipeline() -> None:
+    """Stop the current pipeline (e.g. stub) and rebuild it with the real feed.
+
+    Called after a fresh ICICI session token is pushed via Telegram so the
+    transport upgrades from the offline stub to live Breeze.
+    """
+    global pipeline_task
+    async with _pipeline_lock:
+        old_task = pipeline_task
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            try:
+                await old_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - teardown must not block restart
+                log.warning("pipeline_teardown_error", extra={"error": str(exc)})
+        pipeline_task = asyncio.create_task(_start_pipeline())
+        log.info("pipeline_restarted", extra={"has_token": session_mgr.has_token})
 
 
 @asynccontextmanager
@@ -161,12 +222,26 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         log.error("redis_connect_failed", extra={"error": str(exc)})
     workflow.build()
+    global pipeline_task
     pipeline_task = asyncio.create_task(_start_pipeline())
+
+    def _on_session_updated() -> None:
+        try:
+            asyncio.create_task(_restart_pipeline())
+        except RuntimeError:  # event loop not running (rare teardown)
+            log.warning("pipeline_restart_schedule_failed")
+
+    listener = build_telegram_listener(
+        settings, session_mgr, notify=telegram.send_ops, on_session_updated=_on_session_updated
+    )
+    listener_task = asyncio.create_task(listener.run())
     _start_cron()
     try:
         yield
     finally:
-        pipeline_task.cancel()
+        if pipeline_task is not None:
+            pipeline_task.cancel()
+        listener_task.cancel()
         scheduler.shutdown(wait=False)
         redis_mgr.close()
 
@@ -279,27 +354,15 @@ def ops_ingest_tick(payload: dict) -> dict:
 
 @app.get("/test-signal")
 async def test_signal() -> dict:
-    """Run the full maker->checker workflow on a synthetic tick snapshot."""
-    spot = 0.0
-    levels = premarket.last_result or _premarket_from_redis()
-    if isinstance(levels, dict):
-        spot = float(levels.get("spot") or spot)
-    features = {
-        "spot": spot,
-        "pcr": 1.05,
-        "total_call_oi": 2500000.0,
-        "total_put_oi": 2625000.0,
-        "call_oi_vel_1m": 12500.0,
-        "put_oi_vel_1m": -4300.0,
-        "call_oi_vel_5m": 61200.0,
-        "put_oi_vel_5m": -9800.0,
-        "atr": 40.0,
-        "strike": spot or 23500.0,
-        "near_level": 23500.0,
-        "trigger_type": "SCALP",
-        "volatility": "ACTIVE",
-        "volume_delta_1m": 14500.0,
-    }
+    """Run the maker->checker workflow on the current live feature snapshot.
+
+    Reads the real feature vector from the live pipeline state (spot, PCR, OI
+    velocity, ATR, regime) instead of any synthetic/sample inputs, so it is a
+    faithful diagnostic of what the engine would decide right now.
+    """
+    features = signal_engine.feature_snapshot()
+    if not features.get("spot"):
+        return {"error": "no live data yet — pipeline still warming up"}
     decision = await workflow.invoke(features)
     decision["llm_budget_remaining"] = workflow.maker().budget().remaining
     decision["llm_cached"] = bool(workflow.maker().cache().size)
