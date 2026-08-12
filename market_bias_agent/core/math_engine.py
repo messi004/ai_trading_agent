@@ -122,6 +122,24 @@ def round_levels_in_range(
     return sorted(levels)
 
 
+def levels_in_range(
+    spot: float,
+    tolerance: float = LEVEL_DISTANCE_TOLERANCE,
+    base: int = 100,
+    extra_levels: Sequence[float] = (),
+) -> list[float]:
+    """Union of round levels and extra (e.g. premarket S/R) levels near the spot.
+
+    Extra levels let the PRD Level Condition (`|Spot - L| <= tolerance`) use
+    the next-day premarket S/R fan + max-pain zone, not just round levels.
+    """
+    levels: set[float] = set(round_levels_in_range(spot, tolerance, base))
+    for level in extra_levels:
+        if is_at_level(spot, float(level), tolerance):
+            levels.add(float(level))
+    return sorted(levels)
+
+
 def volume_ratio(volume: float, volume_20ma: float) -> float:
     """Volume / 20-bar moving average."""
     if volume_20ma <= 0:
@@ -163,6 +181,7 @@ def evaluate_triggers(
     intraday_velocity_5m: float = INTRADAY_VELOCITY_5M_MIN,
     volume_vs_20ma_multiplier: float = 1.5,
     tolerance: float = LEVEL_DISTANCE_TOLERANCE,
+    extra_levels: Sequence[float] = (),
 ) -> TriggerResult:
     """Evaluate both trigger pipelines for a single tick.
 
@@ -170,8 +189,11 @@ def evaluate_triggers(
       * Scalp   = |Velocity_1m| >= threshold
                   OR (Spot crosses L AND Volume > 1.5x of 20-MA)
       * Intraday = Spot within Level Condition AND |Velocity_5m| >= threshold
+
+    `extra_levels` (premarket S/R fan, max pain) participate in the Level
+    Condition exactly like round psychological levels.
     """
-    levels = round_levels_in_range(spot, tolerance)
+    levels = levels_in_range(spot, tolerance, extra_levels=extra_levels)
     at_level = len(levels) > 0
     near_level = levels[0] if levels else None
 
@@ -236,6 +258,7 @@ def evaluate_triggers_with_regime(
     volume: float | None = None,
     volume_20ma: float | None = None,
     tolerance: float = LEVEL_DISTANCE_TOLERANCE,
+    extra_levels: Sequence[float] = (),
 ) -> TriggerResult:
     """Run the PRD trigger matrix with regime-scaled thresholds (Phase 2).
 
@@ -254,6 +277,7 @@ def evaluate_triggers_with_regime(
         intraday_velocity_5m=scaled["intraday_velocity_5m"],
         volume_vs_20ma_multiplier=scaled["volume_vs_20ma"],
         tolerance=tolerance,
+        extra_levels=extra_levels,
     )
 
 

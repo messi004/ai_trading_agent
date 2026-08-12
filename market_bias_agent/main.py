@@ -111,8 +111,27 @@ def _run_premarket() -> None:
     try:
         premarket.run()
         health.record_cron_success("premarket")
+        telegram.send_ops(premarket.report_text())
     except Exception as exc:  # noqa: BLE001
         log.error("premarket_cron_failed", extra={"error": str(exc)})
+
+
+def _run_backtest_report(**kwargs: Any) -> str:
+    """Backtest worker for the Telegram /backtest command (runs in a thread)."""
+    from modules.backtest_runner import run_backtest_report
+
+    return run_backtest_report(**kwargs)
+
+
+def _premarket_report() -> str:
+    """On-demand premarket report for Telegram commands/inline buttons."""
+    premarket.run()
+    return premarket.report_text()
+
+
+def _daily_report() -> str:
+    """On-demand daily ops report for Telegram commands/inline buttons."""
+    return monitoring.build_daily_report()
 
 
 def _run_session_refresh() -> None:
@@ -234,7 +253,13 @@ async def lifespan(app: FastAPI):
             log.warning("pipeline_restart_schedule_failed")
 
     listener = build_telegram_listener(
-        settings, session_mgr, notify=telegram.send_ops, on_session_updated=_on_session_updated
+        settings,
+        session_mgr,
+        notify=telegram.send_ops,
+        on_session_updated=_on_session_updated,
+        backtest_runner=_run_backtest_report,
+        premarket_report=_premarket_report,
+        daily_report=_daily_report,
     )
     listener_task = asyncio.create_task(listener.run())
 
@@ -265,9 +290,11 @@ async def lifespan(app: FastAPI):
                         nxt = getattr(cr, "cr_await", None)
                         if nxt is None:
                             nxt = getattr(cr, "ag_await", None)
-                        if nxt is not None and not isinstance(
-                            nxt, types.CoroutineType
-                        ) and not isinstance(nxt, types.AsyncGeneratorType):
+                        if (
+                            nxt is not None
+                            and not isinstance(nxt, types.CoroutineType)
+                            and not isinstance(nxt, types.AsyncGeneratorType)
+                        ):
                             nxt = None
                         cr = nxt
                     log.warning(

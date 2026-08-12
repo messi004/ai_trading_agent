@@ -249,6 +249,12 @@ MARKET_CLOSE_IST = "15:30"
 # ---------------------------------------------------------------------------
 KEY_PRE_MARKET_LEVELS = "premarket_levels"
 PRE_MARKET_LEVELS_TTL_SECONDS = 12 * 3600  # survives the next trading day
+KEY_EOD_STRUCTURAL_BIAS = "eod_structural_bias"
+# EOD 18:00 IST -> next trading day 15:30 IST close (~21.5h). 30h TTL covers a
+# normal overnight gap; the signal engine also validates session_date, so a
+# Friday EOD bias simply goes stale over the weekend (Monday morning premarket
+# recomputes it) instead of being misapplied.
+EOD_STRUCTURAL_BIAS_TTL_SECONDS = 30 * 3600
 MAX_PAIN_PINNING_TOLERANCE = 12.0  # |spot - max_pain| band used by live engine
 S_R_LEVEL_ROUND_BASE = 100  # psychological level spacing (24000, 24100, ...)
 

@@ -18,6 +18,7 @@ from config.settings import Settings, get_settings
 from core.data_store import DataStore
 from core.logger import get_logger, setup_logging
 from modules.backtest_engine import BacktestEngine
+from modules.backtest_runner import _window_label, _window_start_ts
 from modules.replay_engine import HistoricalOIProvider, ReplayEngine
 
 log = get_logger(__name__)
@@ -41,20 +42,25 @@ def main() -> None:
         action="store_true",
         help="Also run walk-forward windows over the data",
     )
+    parser.add_argument("--days", type=float, default=None, help="Trailing window: last N days")
+    parser.add_argument("--months", type=float, default=None, help="Trailing window: last N months")
+    parser.add_argument("--years", type=float, default=None, help="Trailing window: last N years")
     args = parser.parse_args()
 
     setup_logging("INFO", json_output=False)
     settings: Settings = get_settings()
     store = DataStore(settings, base_dir=args.data_dir)
 
-    candles = store.load_candles(args.symbol)
+    start_ts = _window_start_ts(days=args.days, months=args.months, years=args.years)
+    candles = store.load_candles(args.symbol, start_ts=start_ts)
     if not candles:
         raise SystemExit(
-            f"no candles for {args.symbol.upper()} — run ingest_history first "
-            "(with a live session token)"
+            f"no candles for {args.symbol.upper()} in window "
+            f"({_window_label(days=args.days, months=args.months, years=args.years)}) — "
+            "run ingest_history first (with a live session token)"
         )
     try:
-        oi = HistoricalOIProvider.from_store(store, args.symbol)
+        oi = HistoricalOIProvider.from_store(store, args.symbol, start_ts=start_ts)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 

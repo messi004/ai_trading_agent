@@ -197,3 +197,83 @@ def test_engine_books_premium_pnl_on_oi_ticks(env) -> None:
     closed = trader.closed_positions()
     assert closed and closed[0].exit_reason == "TARGET_HIT"
     assert closed[0].pnl_premium_points == pytest.approx(10.0)
+
+
+def test_structural_bias_feature_from_redis(env) -> None:
+    from utils.time_utils import now_ist
+
+    redis_mgr, engine, *_ = env
+    redis_mgr.set_eod_bias(
+        {
+            "bias": "BEARISH",
+            "signals": ["FII net short index futures", "FII written more calls than puts"],
+            "nifty50": 24636.0,
+            "session_date": now_ist().date().isoformat(),
+            "computed_at_ist": now_ist().isoformat(),
+        }
+    )
+    features = engine.feature_snapshot()
+    assert features["structural_bias"] == "BEARISH"
+    assert "FII net short index futures" in features["institutional_signals"]
+
+
+def test_structural_bias_neutral_when_stale(env) -> None:
+    from datetime import timedelta
+
+    from utils.time_utils import now_ist
+
+    redis_mgr, engine, *_ = env
+    redis_mgr.set_eod_bias(
+        {
+            "bias": "BULLISH",
+            "signals": ["FII net long index futures"],
+            "session_date": (now_ist() - timedelta(days=1)).date().isoformat(),
+            "computed_at_ist": now_ist().isoformat(),
+        }
+    )
+    features = engine.feature_snapshot()
+    assert features["structural_bias"] == "NEUTRAL"
+    assert features["institutional_signals"] == []
+
+
+def test_structural_bias_neutral_when_missing(env) -> None:
+    redis_mgr, engine, *_ = env
+    assert redis_mgr.get_eod_bias() is None
+    features = engine.feature_snapshot()
+    assert features["structural_bias"] == "NEUTRAL"
+    assert features["institutional_signals"] == []
+
+
+def test_premarket_context_features_structured(env) -> None:
+    redis_mgr, engine, *_ = env
+    redis_mgr.set_pre_market_levels(
+        {
+            "session_date": "2026-08-12",
+            "prev_high": 24200.0,
+            "prev_low": 24000.0,
+            "prev_close": 24100.0,
+            "pivot": 24100.0,
+            "r1": 24200.0,
+            "r2": 24300.0,
+            "s1": 24000.0,
+            "s2": 23900.0,
+            "psych_resistance": 24200.0,
+            "psych_support": 24000.0,
+            "levels": [23900.0, 24000.0, 24100.0, 24200.0, 24300.0],
+            "max_pain": {"strike": 24100.0, "zone": [24088.0, 24112.0]},
+        }
+    )
+    features = engine.feature_snapshot()
+    assert features["premarket_pivot"] == 24100.0
+    assert features["premarket_s1"] == 24000.0
+    assert features["premarket_r1"] == 24200.0
+    assert features["premarket_max_pain"] == 24100.0
+    assert features["premarket_max_pain_zone"] == [24088.0, 24112.0]
+
+
+def test_premarket_context_empty_when_missing(env) -> None:
+    redis_mgr, engine, *_ = env
+    assert redis_mgr.get_pre_market_levels() is None
+    features = engine.feature_snapshot()
+    assert "premarket_pivot" not in features
+    assert "premarket_max_pain" not in features

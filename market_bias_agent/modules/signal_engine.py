@@ -40,12 +40,16 @@ from graph.workflow import SignalWorkflow
 from modules.paper_trader import PaperPosition, PaperTrader
 from modules.post_analysis import PostAnalysisEngine
 from utils.telegram_bot import TelegramBot
-from utils.time_utils import market_status
+from utils.time_utils import market_status, now_ist
 
 log = get_logger(__name__)
 
 MAX_OI_HISTORY_SECONDS = 320.0
 FEATURE_THROTTLE_SECONDS = 1.0
+# Institutional bias computed at 18:00 IST is valid for the next trading day.
+# A bias older than this is treated as stale even if the session_date still
+# matches (e.g. a very late/failed cron from a prior day).
+BIAS_MAX_AGE_SECONDS = 26 * 3600
 
 
 def _expiry_week(ts_epoch: float) -> int:
@@ -130,7 +134,7 @@ class SignalEngine:
         volume_delta = compute_volume_delta(spot_ticks[-50:]) if spot_ticks else None
 
         near_level = self._near_level(self._spot)
-        return {
+        features = {
             "spot": self._spot,
             "pcr": pcr,
             "total_call_oi": total_call,
@@ -146,6 +150,50 @@ class SignalEngine:
             "volatility": self._regime,
             "volume_delta_1m": volume_delta.delta if volume_delta else 0.0,
             "volume_delta_bias": volume_delta.bias if volume_delta else "NEUTRAL",
+        }
+        features.update(self._structural_bias())
+        features.update(self._premarket_context())
+        return features
+        return features
+
+    def _structural_bias(self) -> dict[str, Any]:
+        """Best-effort EOD institutional bias for the next-day signal engine.
+
+        Reads the previous EOD structural bias from Redis and applies it only
+        when it belongs to a recent session. Never blocks the tick path — a
+        missing/stale/Redis-failed bias degrades to NEUTRAL with no signals.
+        """
+        try:
+            bias = self._redis.get_eod_bias()
+        except Exception as exc:  # noqa: BLE001 - bias is advisory, never breaks ticks
+            log.warning("signal_bias_read_failed", extra={"error": str(exc)})
+            return {"structural_bias": "NEUTRAL", "institutional_signals": []}
+        if not isinstance(bias, dict):
+            return {"structural_bias": "NEUTRAL", "institutional_signals": []}
+        try:
+            session_date = str(bias.get("session_date") or "")
+            computed_at = str(bias.get("computed_at_ist") or "")
+            today = now_ist().date().isoformat()
+            stale = bool(session_date) and session_date != today
+            if not stale:
+                try:
+                    computed = datetime.fromisoformat(computed_at)
+                    if computed.tzinfo is None:
+                        computed = computed.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    computed = None
+                if (
+                    computed is not None
+                    and (now_ist() - computed).total_seconds() > BIAS_MAX_AGE_SECONDS
+                ):
+                    stale = True
+        except Exception:  # noqa: BLE001 - any parse issue just skips the bias
+            stale = True
+        if stale:
+            return {"structural_bias": "NEUTRAL", "institutional_signals": []}
+        return {
+            "structural_bias": str(bias.get("bias", "NEUTRAL")).upper(),
+            "institutional_signals": list(bias.get("signals") or []),
         }
 
     def _total_oi(self) -> tuple[float, float]:
@@ -216,6 +264,58 @@ class SignalEngine:
             log.warning("signal_level_read_failed", extra={"error": str(exc)})
         return nearest_round_level(spot)
 
+    def _premarket_context(self) -> dict[str, Any]:
+        """Structured next-day S/R fan + max-pain band for the LLM prompt.
+
+        Flattens the Redis premarket levels into explicit feature keys so the
+        Maker sees the actual pivot/S1/R1 fan and the max-pain pinning band
+        instead of a single nearest level. Best-effort — a missing read
+        degrades to an empty dict, never breaks the tick path.
+        """
+        try:
+            levels = self._redis.get_pre_market_levels()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("signal_premarket_read_failed", extra={"error": str(exc)})
+            return {}
+        if not isinstance(levels, dict):
+            return {}
+        ctx: dict[str, Any] = {}
+        for key in ("pivot", "r1", "r2", "s1", "s2", "psych_resistance", "psych_support"):
+            value = levels.get(key)
+            if value is not None:
+                try:
+                    ctx[f"premarket_{key}"] = round(float(value), 2)
+                except (TypeError, ValueError):
+                    continue
+        pain = levels.get("max_pain")
+        if isinstance(pain, dict):
+            if pain.get("strike") is not None:
+                ctx["premarket_max_pain"] = pain["strike"]
+            zone = pain.get("zone")
+            if isinstance(zone, list | tuple) and len(zone) == 2:
+                ctx["premarket_max_pain_zone"] = [
+                    round(float(zone[0]), 2),
+                    round(float(zone[1]), 2),
+                ]
+        return ctx
+
+    def _premarket_level_list(self) -> list[float]:
+        """Levels from the premarket context usable by the trigger matrix."""
+        ctx = self._premarket_context()
+        levels: list[float] = []
+        for key in (
+            "premarket_pivot",
+            "premarket_r1",
+            "premarket_r2",
+            "premarket_s1",
+            "premarket_s2",
+        ):
+            if key in ctx:
+                levels.append(float(ctx[key]))
+        if "premarket_max_pain" in ctx:
+            levels.append(float(ctx["premarket_max_pain"]))
+        return levels
+
     def _atm_strike(self, spot: float) -> float:
         """Nearest tradable strike to the spot from the option chain."""
         try:
@@ -273,6 +373,7 @@ class SignalEngine:
             self._spot,
             features["regime"],
             self._settings.trigger,
+            extra_levels=self._premarket_level_list(),
         )
         if not trigger.triggered:
             return
@@ -387,8 +488,10 @@ class SignalEngine:
             self._close_position(position)
 
     def _close_position(self, position: PaperPosition) -> None:
-        pnl = position.pnl_premium_points if position.pnl_premium_points is not None else (
-            position.pnl_points or 0.0
+        pnl = (
+            position.pnl_premium_points
+            if position.pnl_premium_points is not None
+            else (position.pnl_points or 0.0)
         )
         try:
             summary = self._post.record_exit(

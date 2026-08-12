@@ -122,3 +122,24 @@ class TestPreMarketEngine:
         result = engine.run()
         assert "max_pain" not in result
         assert result["s1"] > 0
+
+    def test_report_text_with_levels(self) -> None:
+        engine, mgr, _ = self._make_engine()
+        mgr.push_spot_tick({"price": 23800, "ts_epoch": 1.0})
+        mgr.push_spot_tick({"price": 24200, "ts_epoch": 2.0})
+        mgr.push_spot_tick({"price": 24000, "ts_epoch": 3.0})
+        mgr.set_strikes([24100])
+        mgr.push_call_oi(24100, 900.0)
+        mgr.push_put_oi(24100, 950.0)
+        engine.run()
+
+        text = engine.report_text()
+        assert "🌅 Premarket Levels" in text
+        assert "Pivot: <b>24,000.0</b>" in text
+        assert "R1" in text and "S1" in text
+        assert "Max Pain: 24,100" in text
+
+    def test_report_text_empty(self) -> None:
+        engine, _, _ = self._make_engine()
+        text = engine.report_text()
+        assert "No prior-session data" in text

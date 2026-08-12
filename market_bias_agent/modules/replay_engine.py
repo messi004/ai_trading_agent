@@ -54,8 +54,10 @@ class HistoricalOIProvider:
             self._put.append(put)
 
     @classmethod
-    def from_store(cls, store: DataStore, symbol: str) -> HistoricalOIProvider:
-        series = store.load_oi_series(symbol)
+    def from_store(
+        cls, store: DataStore, symbol: str, start_ts: float | None = None
+    ) -> HistoricalOIProvider:
+        series = store.load_oi_series(symbol, start_ts=start_ts)
         if not series:
             raise ValueError(
                 f"no real OI series found for {symbol.upper()} — "

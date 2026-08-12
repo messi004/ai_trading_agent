@@ -60,6 +60,52 @@ def test_build_maker_prompt_includes_features_and_memory() -> None:
     assert MAKER_SYSTEM_PROMPT  # sanity: module-level prompt exists
 
 
+def test_build_maker_prompt_includes_institutional_context() -> None:
+    prompt = build_maker_prompt(
+        {
+            "pcr": 1.05,
+            "spot": 23500.0,
+            "structural_bias": "BEARISH",
+            "institutional_signals": ["FII net short index futures"],
+        },
+        None,
+    )
+    assert "Institutional context (EOD): bias=BEARISH" in prompt
+    assert "FII net short index futures" in prompt
+    # the raw signals list is not dumped into the features line
+    assert "institutional_signals=[" not in prompt
+
+
+def test_build_maker_prompt_neutral_context_when_no_bias() -> None:
+    prompt = build_maker_prompt({"pcr": 1.05, "spot": 23500.0, "structural_bias": "NEUTRAL"}, None)
+    assert "No institutional context available." in prompt
+
+
+def test_build_maker_prompt_includes_premarket_sr_fan() -> None:
+    prompt = build_maker_prompt(
+        {
+            "pcr": 1.05,
+            "spot": 24100.0,
+            "premarket_pivot": 24100.0,
+            "premarket_r1": 24200.0,
+            "premarket_s1": 24000.0,
+            "premarket_max_pain": 24100.0,
+            "premarket_max_pain_zone": [24088.0, 24112.0],
+        },
+        None,
+    )
+    assert "Premarket S/R fan" in prompt
+    assert "PIVOT = 24,100.0" in prompt
+    assert "R1 = 24,200.0" in prompt
+    assert "S1 = 24,000.0" in prompt
+    assert "MAX_PAIN zone = 24,088.0 – 24,112.0" in prompt
+
+
+def test_build_maker_prompt_no_premarket_when_absent() -> None:
+    prompt = build_maker_prompt({"pcr": 1.05, "spot": 23500.0}, None)
+    assert "No premarket S/R levels available." in prompt
+
+
 def test_maker_uses_injected_llm_and_parses_json() -> None:
     node = MakerNode(
         _settings(),

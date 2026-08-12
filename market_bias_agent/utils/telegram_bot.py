@@ -8,6 +8,7 @@ pipeline never crashes in offline/local mode.
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import httpx
 
@@ -51,11 +52,36 @@ class TelegramBot:
                 time.sleep(RETRY_DELAY_SECONDS)
         return False
 
-    def send_text(self, chat_id: str | None, text: str) -> bool:
+    def send_text(self, chat_id: str | None, text: str, reply_markup: dict | None = None) -> bool:
         if not chat_id:
             log.warning("telegram_no_chat_id", extra={"text_len": len(text)})
             return False
-        return self._post("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._post("sendMessage", payload)
+
+    def send_menu(self, chat_id: str | None, text: str, buttons: list[list[dict]]) -> bool:
+        """Send text with an inline keyboard (menu/quick actions)."""
+        return self.send_text(chat_id, text, reply_markup={"inline_keyboard": buttons})
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
+        """Acknowledge an inline-button press (clears the spinner on the button)."""
+        if not self._token:
+            return False
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+            payload["show_alert"] = False
+        try:
+            response = self._client.post(
+                TELEGRAM_API.format(token=self._token, method="answerCallbackQuery"),
+                json=payload,
+            )
+            return bool(response.status_code == 200 and response.json().get("ok"))
+        except httpx.HTTPError as exc:
+            log.warning("telegram_callback_answer_error", extra={"error": str(exc)})
+            return False
 
     def send_photo(self, chat_id: str | None, png_bytes: bytes, caption: str = "") -> bool:
         if not chat_id:

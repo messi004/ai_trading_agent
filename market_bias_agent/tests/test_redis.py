@@ -60,3 +60,22 @@ def test_pre_market_levels_roundtrip() -> None:
 def test_pre_market_levels_missing_returns_none() -> None:
     mgr, _ = _make_manager()
     assert mgr.get_pre_market_levels() is None
+
+
+def test_eod_bias_roundtrip() -> None:
+    mgr, _ = _make_manager()
+    bias = {
+        "bias": "BEARISH",
+        "signals": ["FII net short index futures"],
+        "nifty50": 24636.0,
+        "session_date": "2026-08-11",
+        "computed_at_ist": "2026-08-11T18:00:00+05:30",
+        "participants": {"FII": {"future_index_net": -255113.0}},
+    }
+    mgr.set_eod_bias(bias)
+    assert mgr.get_eod_bias() == bias
+
+
+def test_eod_bias_missing_returns_none() -> None:
+    mgr, _ = _make_manager()
+    assert mgr.get_eod_bias() is None

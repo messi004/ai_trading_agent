@@ -56,13 +56,19 @@ class DataStore:
         log.info("candles_saved", extra={"symbol": symbol, "count": len(frame), "path": str(path)})
         return path
 
-    def load_candles(self, symbol: str) -> list[Candle]:
-        """Load all candles for a symbol (empty if file missing)."""
+    def load_candles(self, symbol: str, start_ts: float | None = None) -> list[Candle]:
+        """Load candles for a symbol (empty if file missing).
+
+        `start_ts` filters to candles at or after that epoch — used by the
+        backtest range windows (days/months/years).
+        """
         path = self._path_for(symbol)
         if not path.exists():
             return []
         frame = pd.read_parquet(path)
         frame = frame.sort_values("ts_epoch")
+        if start_ts is not None:
+            frame = frame[frame["ts_epoch"] >= start_ts]
         candles = [
             Candle(
                 open=float(row[1]),
@@ -82,9 +88,7 @@ class DataStore:
     def _oi_path_for(self, symbol: str) -> Path:
         return self._base / f"{symbol.upper()}_oi_1m.parquet"
 
-    def save_oi_series(
-        self, symbol: str, series: list[tuple[float, float, float]]
-    ) -> Path:
+    def save_oi_series(self, symbol: str, series: list[tuple[float, float, float]]) -> Path:
         """Persist (ts_epoch, total_call_oi, total_put_oi) rows to parquet."""
         path = self._oi_path_for(symbol)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,13 +109,21 @@ class DataStore:
         )
         return path
 
-    def load_oi_series(self, symbol: str) -> list[tuple[float, float, float]]:
-        """Load (ts_epoch, total_call_oi, total_put_oi) rows (empty if missing)."""
+    def load_oi_series(
+        self, symbol: str, start_ts: float | None = None
+    ) -> list[tuple[float, float, float]]:
+        """Load (ts_epoch, total_call_oi, total_put_oi) rows (empty if missing).
+
+        `start_ts` filters to rows at or after that epoch so the backtest OI
+        series stays aligned with the candle range.
+        """
         path = self._oi_path_for(symbol)
         if not path.exists():
             return []
         frame = pd.read_parquet(path)
         frame = frame.sort_values("ts_epoch")
+        if start_ts is not None:
+            frame = frame[frame["ts_epoch"] >= start_ts]
         return [
             (float(row[0]), float(row[1]), float(row[2]))
             for row in frame.itertuples(index=False, name=None)

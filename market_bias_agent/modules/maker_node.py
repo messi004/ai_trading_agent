@@ -40,11 +40,19 @@ log = get_logger(__name__)
 class MakerOutputError(Exception):
     """Raised when the LLM output fails schema validation (not cached)."""
 
+
 MAKER_SYSTEM_PROMPT = """You are an institutional Nifty 50 index-options analyst.
 
 You are given live mathematical features (PCR, OI velocity, spot vs levels,
-volume delta, volatility regime) plus similar historical trap situations from
-a vector memory.
+volume delta, volatility regime), similar historical trap situations from a
+vector memory, an optional EOD institutional (FII/PRO) structural bias, and
+the next-day premarket S/R fan + max-pain pinning zone.
+
+The institutional bias is advisory only: treat it as a tilt in your confidence
+and rationale, never as a mandate. When the live features conflict with the
+bias, prefer the live features. The premarket S/R levels mark likely
+rejection/bounce zones — factor them into your entry/exit reasoning, but never
+invent levels far from the given spot.
 
 Return STRICT JSON only (no markdown, no commentary) with this exact schema:
 {
@@ -79,15 +87,66 @@ def _memory_context_text(memory_context: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def _institutional_context_text(features: dict[str, Any]) -> str:
+    """EOD institutional (FII/PRO) bias for the prompt.
+
+    The bias is advisory only — it tilts the analysis, it is never a mandate.
+    """
+    bias = str(features.get("structural_bias") or "NEUTRAL").upper()
+    signals = features.get("institutional_signals") or []
+    if bias == "NEUTRAL" and not signals:
+        return "No institutional context available."
+    lines = [f"Institutional context (EOD): bias={bias}"]
+    for signal in signals[:5]:
+        lines.append(f"  • {signal}")
+    lines.append(
+        "Treat this bias as a tilt in your confidence, not an instruction. "
+        "Confirm with live features before any directional call."
+    )
+    return "\n".join(lines)
+
+
+def _premarket_context_text(features: dict[str, Any]) -> str:
+    """Structured next-day S/R fan + max-pain pinning band for the prompt."""
+    keys = (
+        "premarket_pivot",
+        "premarket_r1",
+        "premarket_r2",
+        "premarket_s1",
+        "premarket_s2",
+        "premarket_max_pain",
+    )
+    present = [(k, features.get(k)) for k in keys if features.get(k) is not None]
+    zone = features.get("premarket_max_pain_zone")
+    if not present and not zone:
+        return "No premarket S/R levels available."
+    lines = ["Premarket S/R fan (from previous session):"]
+    for key, value in present:
+        label = key.replace("premarket_", "").upper()
+        lines.append(f"  • {label} = {value:,.1f}")
+    if zone:
+        lines.append(f"  • MAX_PAIN zone = {zone[0]:,.1f} – {zone[1]:,.1f}")
+    lines.append(
+        "The S/R fan marks likely rejection/bounce zones for the session — "
+        "weight price action around these levels."
+    )
+    return "\n".join(lines)
+
+
 def build_maker_prompt(features: dict[str, Any], memory_context: dict[str, Any] | None) -> str:
     """Human-readable feature snapshot for the LLM."""
-    parts = [f"{key}={value}" for key, value in sorted(features.items())]
+    prompt_features = {k: v for k, v in features.items() if k not in ("institutional_signals",)}
+    parts = [f"{key}={value}" for key, value in sorted(prompt_features.items())]
     features_text = ", ".join(parts) if parts else "{}"
     return (
         "Live features:\n"
         f"{features_text}\n\n"
         "Historical memory:\n"
         f"{_memory_context_text(memory_context)}\n\n"
+        "Institutional context:\n"
+        f"{_institutional_context_text(features)}\n\n"
+        "Premarket context:\n"
+        f"{_premarket_context_text(features)}\n\n"
         "Produce the trade-bias JSON now."
     )
 

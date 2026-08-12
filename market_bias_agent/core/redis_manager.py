@@ -12,8 +12,10 @@ import redis
 
 from config.constants import (
     AUDIT_TRAIL_KEY,
+    EOD_STRUCTURAL_BIAS_TTL_SECONDS,
     EXPIRY_ROLLOVER_KEY,
     KEY_CALL_OI_PREFIX,
+    KEY_EOD_STRUCTURAL_BIAS,
     KEY_PRE_MARKET_LEVELS,
     KEY_PUT_OI_PREFIX,
     KEY_RAW_TICK_STREAM,
@@ -174,6 +176,24 @@ class RedisManager:
     def get_pre_market_levels(self) -> dict[str, Any] | None:
         assert self.client is not None
         raw = cast(str | None, self.client.get(KEY_PRE_MARKET_LEVELS))
+        if raw is None:
+            return None
+        return cast(dict[str, Any], json.loads(raw))
+
+    # ------------------------------------------------------------------
+    # EOD structural bias (Phase 8): next-day FII/PRO institutional bias
+    # ------------------------------------------------------------------
+    def set_eod_bias(
+        self, bias: dict[str, Any], ttl_seconds: int = EOD_STRUCTURAL_BIAS_TTL_SECONDS
+    ) -> None:
+        """Persist the EOD institutional bias for the next trading session."""
+        assert self.client is not None
+        self.client.set(KEY_EOD_STRUCTURAL_BIAS, json.dumps(bias, default=str))
+        self.client.expire(KEY_EOD_STRUCTURAL_BIAS, ttl_seconds)
+
+    def get_eod_bias(self) -> dict[str, Any] | None:
+        assert self.client is not None
+        raw = cast(str | None, self.client.get(KEY_EOD_STRUCTURAL_BIAS))
         if raw is None:
             return None
         return cast(dict[str, Any], json.loads(raw))

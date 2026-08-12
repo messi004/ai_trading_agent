@@ -280,3 +280,84 @@ class TestEODEngine:
         result = engine.run()
         assert result["participant_report"]["status"] == "unavailable"
         assert "traps_indexed" in result
+
+    def test_run_persists_bias_to_redis(self) -> None:
+        import fakeredis
+
+        from core.redis_manager import RedisManager
+
+        redis_mgr = RedisManager(Settings())
+        redis_mgr.client = fakeredis.FakeRedis(decode_responses=True)
+
+        class _OkParticipant:
+            def fetch_latest(self):
+                from core.participant_oi import ParticipantPosition
+
+                return [
+                    ParticipantPosition(
+                        client_type="FII",
+                        future_index_long=32009.0,
+                        future_index_short=287122.0,
+                        option_index_call_long=0.0,
+                        option_index_call_short=683709.0,
+                        option_index_put_long=0.0,
+                        option_index_put_short=620999.0,
+                        date="2026-08-11",
+                        nifty50=24636.0,
+                    )
+                ]
+
+        engine = EODEngine(
+            Settings(),
+            memory=make_service(),
+            participant_provider=_OkParticipant(),
+            redis=redis_mgr,
+        )
+        result = engine.run()
+        assert result["participant_report"]["status"] == "ok"
+        bias = redis_mgr.get_eod_bias()
+        assert bias is not None
+        assert bias["bias"] == "BEARISH"
+        assert "computed_at_ist" in bias
+        assert "signals" in bias
+
+    def test_detailed_report_contains_positioning_and_signals(self) -> None:
+        class _OkParticipant:
+            def fetch_latest(self):
+                from core.participant_oi import ParticipantPosition
+
+                return [
+                    ParticipantPosition(
+                        client_type="FII",
+                        future_index_long=32009.0,
+                        future_index_short=287122.0,
+                        option_index_call_long=0.0,
+                        option_index_call_short=683709.0,
+                        option_index_put_long=0.0,
+                        option_index_put_short=620999.0,
+                        date="2026-08-11",
+                        nifty50=24636.0,
+                    ),
+                    ParticipantPosition(
+                        client_type="CLIENT",
+                        future_index_long=228874.0,
+                        future_index_short=62043.0,
+                        option_index_call_long=0.0,
+                        option_index_call_short=2897584.0,
+                        option_index_put_long=0.0,
+                        option_index_put_short=4141090.0,
+                        date="2026-08-11",
+                        nifty50=24636.0,
+                    ),
+                ]
+
+        engine = EODEngine(Settings(), memory=make_service(), participant_provider=_OkParticipant())
+        report = engine._participant_report()
+        text = engine._report_text(report, ["a", "b"])
+        assert "Structural bias: <b>BEARISH</b>" in text
+        assert "📊 Positioning" in text
+        assert "FII" in text
+        assert "CLIENT" in text
+        assert "futures net" in text
+        assert "🎯 Signals" in text
+        assert "Traps indexed to memory: 2" in text

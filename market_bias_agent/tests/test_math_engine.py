@@ -92,6 +92,20 @@ class TestTriggers:
         r = evaluate_triggers(m, spot=24050, intraday_velocity_5m=150_000)
         assert not r.triggered
 
+    def test_intraday_fires_at_premarket_extra_level(self) -> None:
+        m = self._metrics(call_vel_5m=160_000)
+        # Spot 24050 is NOT a round level, but S1 = 24045 is a premarket level.
+        r = evaluate_triggers(m, spot=24050, intraday_velocity_5m=150_000, extra_levels=[24045.0])
+        assert r.triggered
+        assert r.trigger_type == "INTRADAY"
+        assert r.details["at_level"] is True
+
+    def test_extra_level_outside_tolerance_ignored(self) -> None:
+        m = self._metrics(call_vel_5m=160_000)
+        # 24045 is 5 pts away -> within 12; 24100 is 50 pts away -> ignored.
+        r = evaluate_triggers(m, spot=24050, intraday_velocity_5m=150_000, extra_levels=[24100.0])
+        assert not r.triggered
+
     def test_scalp_volume_cross_at_level(self) -> None:
         m = self._metrics()
         r = evaluate_triggers(

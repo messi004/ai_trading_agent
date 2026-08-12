@@ -124,6 +124,16 @@ class TestTelegramBot:
         assert bot.send_text(None, "hello") is False
         bot.close()
 
+    def test_no_chat_id_fails_menu(self) -> None:
+        bot = TelegramBot(Settings(telegram_bot_token="fake"))
+        assert bot.send_menu(None, "hello", [[{"text": "Go", "callback_data": "go"}]]) is False
+        bot.close()
+
+    def test_answer_callback_no_token_returns_false(self) -> None:
+        bot = TelegramBot(Settings(telegram_bot_token=""))
+        assert bot.answer_callback_query("q1", "ok") is False
+        bot.close()
+
 
 class TestMonitoring:
     def test_watchdog_silent_outside_market(self) -> None:

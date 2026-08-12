@@ -89,6 +89,31 @@ class PreMarketEngine:
         )
         return levels
 
+    def report_text(self) -> str:
+        """Structured premarket levels summary for the Telegram ops channel."""
+        levels = self.last_result or {}
+        if not levels:
+            return "<b>🌅 Premarket</b>\nNo prior-session data available — levels skipped."
+        lines = [
+            "<b>🌅 Premarket Levels</b>",
+            f"Session: {levels.get('session_date', '')} | "
+            f"Prev H/L/C: {levels.get('prev_high', 0.0):,.1f} / "
+            f"{levels.get('prev_low', 0.0):,.1f} / {levels.get('prev_close', 0.0):,.1f}",
+            "",
+            f"Pivot: <b>{levels.get('pivot', 0.0):,.1f}</b>",
+            f"R1 {levels.get('r1', 0.0):,.1f} | R2 {levels.get('r2', 0.0):,.1f}",
+            f"S1 {levels.get('s1', 0.0):,.1f} | S2 {levels.get('s2', 0.0):,.1f}",
+        ]
+        pain = levels.get("max_pain")
+        if isinstance(pain, dict):
+            zone = pain.get("zone")
+            if isinstance(zone, list | tuple) and zone:
+                zone_txt = f" ({zone[0]:,.1f}–{zone[1]:,.1f})"
+            else:
+                zone_txt = ""
+            lines.append(f"Max Pain: {pain.get('strike', 0.0):,.0f}{zone_txt}")
+        return "\n".join(lines)
+
     def _max_pain_summary(self, redis: RedisManager) -> dict[str, Any] | None:
         """Max pain from per-strike Call/Put OI windows (best-effort)."""
         strikes = redis.get_strikes()

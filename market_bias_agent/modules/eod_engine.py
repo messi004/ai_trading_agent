@@ -23,10 +23,12 @@ from core.participant_oi import (
     ParticipantOIError,
     compute_structural_bias,
 )
+from core.redis_manager import RedisManager
 from core.signal_store import SignalLogStore
 from memory.memory_service import MemoryService
 from memory.trap_records import TrapRecord, compute_subsequent_move
 from utils.telegram_bot import TelegramBot
+from utils.time_utils import now_ist
 
 log = get_logger(__name__)
 
@@ -38,12 +40,14 @@ class EODEngine:
         memory: MemoryService | None = None,
         store: SignalLogStore | None = None,
         telegram: TelegramBot | None = None,
+        redis: RedisManager | None = None,
         participant_provider: Any | None = None,
     ) -> None:
         self._settings = settings
         self._memory = memory
         self._store = store or SignalLogStore()
         self._telegram = telegram
+        self._redis = redis
         self._participant = participant_provider or NiftyTraderParticipantOIProvider()
 
     def run(self) -> dict[str, Any]:
@@ -57,6 +61,8 @@ class EODEngine:
 
         report = self._participant_report()
         result["participant_report"] = report
+        if report.get("status") == "ok":
+            self._persist_bias(report)
 
         indexed = self.index_day_traps()
         result["traps_indexed"] = len(indexed)
@@ -66,6 +72,23 @@ class EODEngine:
 
         log.info("eod_run_done", extra={"traps_indexed": len(indexed)})
         return result
+
+    def _persist_bias(self, report: dict[str, Any]) -> None:
+        """Store the structural bias for the next-day signal engine."""
+        try:
+            redis = self._redis or self._get_redis()
+            bias = {
+                "bias": report.get("bias", "NEUTRAL"),
+                "signals": report.get("signals") or [],
+                "nifty50": report.get("nifty50", 0.0),
+                "session_date": report.get("date", ""),
+                "computed_at_ist": now_ist().isoformat(),
+                "participants": report.get("participants") or {},
+            }
+            redis.set_eod_bias(bias)
+            log.info("eod_bias_persisted", extra={"bias": bias["bias"]})
+        except Exception as exc:  # noqa: BLE001 - bias persistence must not abort EOD
+            log.warning("eod_bias_persist_failed", extra={"error": str(exc)})
 
     # ------------------------------------------------------------------
     # FII/PRO institutional footprint
@@ -96,20 +119,80 @@ class EODEngine:
         )
         return report
 
-    @staticmethod
-    def _report_text(report: dict[str, Any], indexed: list[str]) -> str:
+    def _report_text(self, report: dict[str, Any], indexed: list[str]) -> str:
+        """Detailed EOD report: positioning table + signals + day recap + traps."""
         lines = ["<b>📉 EOD Institutional Report</b>"]
         if report.get("status") != "ok":
             lines.append("Participant OI: unavailable (skipped)")
         else:
-            lines.append(f"Date: {report['date']} | Nifty {report['nifty50']:.0f}")
-            lines.append(f"Structural bias: <b>{report['bias']}</b>")
+            date = report.get("date") or ""
+            nifty = float(report.get("nifty50") or 0.0)
+            lines.append(f"Date: {date} | Nifty {nifty:,.0f}")
+            lines.append(f"Structural bias: <b>{report.get('bias')}</b>")
+
+            participants = report.get("participants") or {}
+            cohort_lines: list[str] = []
+            for cohort in ("FII", "PRO", "CLIENT", "DII"):
+                row = participants.get(cohort) or participants.get(cohort.lower())
+                if not row:
+                    continue
+                fut_net = float(row.get("future_index_net") or 0.0)
+                call_short = float(row.get("option_index_call_short") or 0.0)
+                put_short = float(row.get("option_index_put_short") or 0.0)
+                fut_txt = f"{fut_net:+,.0f}"
+                cohort_lines.append(
+                    f"  • {cohort:<7}: futures net {fut_txt} | "
+                    f"calls written {call_short:,.0f} | puts written {put_short:,.0f}"
+                )
+            if cohort_lines:
+                lines.append("")
+                lines.append("📊 Positioning (contracts):")
+                lines.extend(cohort_lines)
+
             signals = report.get("signals") or []
             if signals:
-                lines.append("Signals:")
+                lines.append("")
+                lines.append("🎯 Signals:")
                 lines.extend(f"  • {s}" for s in signals)
-        lines.append(f"Traps indexed to memory: {len(indexed)}")
+
+        recap = self._day_recap()
+        if recap:
+            lines.append("")
+            lines.append("📋 Day recap:")
+            lines.extend(f"  • {item}" for item in recap)
+
+        if indexed:
+            lines.append("")
+            lines.append(f"🧠 Traps indexed to memory: {len(indexed)}")
         return "\n".join(lines)
+
+    def _day_recap(self) -> list[str]:
+        """Today's signal/outcome summary from the signal store (best-effort)."""
+        try:
+            rows = self._store.get_analysed() + self._store.get_closed()
+        except Exception as exc:  # noqa: BLE001 - recap must never break the EOD report
+            log.warning("eod_day_recap_failed", extra={"error": str(exc)})
+            return []
+        today = datetime.now(timezone.utc).date().isoformat()
+        signals = wins = losses = 0
+        pnl = 0.0
+        for row in rows:
+            generated = float(row.get("generated_at") or 0.0)
+            session_date = datetime.fromtimestamp(generated, tz=timezone.utc).date().isoformat()
+            if session_date != today:
+                continue
+            signals += 1
+            outcome = row.get("outcome")
+            if outcome == "WIN":
+                wins += 1
+            elif outcome == "LOSS":
+                losses += 1
+            pnl += float(row.get("pnl_points") or 0.0)
+        if signals == 0:
+            return []
+        return [
+            f"signals {signals} | win {wins} | loss {losses} | " f"paper PnL {pnl:+.1f} pts",
+        ]
 
     # ------------------------------------------------------------------
     # Memory ingestion (live trap collector)
@@ -151,6 +234,11 @@ class EODEngine:
     def weekly_compact(self) -> int:
         """Weekly compaction: drop stale / low-quality vectors."""
         return self._get_memory().compact_stale()
+
+    def _get_redis(self) -> RedisManager:
+        if self._redis is None:
+            self._redis = RedisManager(self._settings).connect()
+        return self._redis
 
     def _get_memory(self) -> MemoryService:
         if self._memory is None:
