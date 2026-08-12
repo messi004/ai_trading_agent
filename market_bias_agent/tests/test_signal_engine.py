@@ -277,3 +277,29 @@ def test_premarket_context_empty_when_missing(env) -> None:
     features = engine.feature_snapshot()
     assert "premarket_pivot" not in features
     assert "premarket_max_pain" not in features
+
+
+def test_premarket_context_includes_oi_walls(env) -> None:
+    redis_mgr, engine, *_ = env
+    redis_mgr.set_pre_market_levels(
+        {
+            "pivot": 24100.0,
+            "r1": 24200.0,
+            "s1": 24000.0,
+            "max_pain": {"strike": 24100.0, "zone": [24088.0, 24112.0]},
+            "oi_walls": {
+                "resistance": [24200.0, 24250.0],
+                "support": [24000.0, 23950.0],
+                "max_pain": 24100.0,
+            },
+        }
+    )
+    features = engine.feature_snapshot()
+    assert features["premarket_oi_resistance"] == [24200.0, 24250.0]
+    assert features["premarket_oi_support"] == [24000.0, 23950.0]
+    assert features["premarket_oi_max_pain"] == 24100.0
+
+    levels = engine._premarket_level_list()
+    assert 24200.0 in levels
+    assert 23950.0 in levels
+    assert 24100.0 in levels  # both max-pain + walls max pain deduped into the list

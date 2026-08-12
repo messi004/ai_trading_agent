@@ -8,12 +8,14 @@ import fakeredis
 import pytest
 
 from core.premarket_levels import (
+    OIWallLevels,
     PreMarketLevelsError,
     combined_oi_by_strike,
     compute_pivot_sr,
     find_max_pain_strike,
     max_pain_zone,
     nearest_level,
+    oi_wall_levels,
     psychological_levels_around,
     session_bounds_from_ticks,
 )
@@ -66,6 +68,48 @@ class TestMaxPain:
 
     def test_empty_oi_no_zone(self) -> None:
         assert max_pain_zone({}) is None
+
+
+class TestOIWalls:
+    def test_call_walls_are_resistance_above_spot(self) -> None:
+        # spot ~24000; heavy Call OI at 24100/24150 -> resistance above spot
+        call = {23900: 100.0, 24000: 200.0, 24100: 900.0, 24150: 800.0, 24200: 400.0}
+        put = {23850: 500.0, 23950: 700.0, 24050: 600.0, 24150: 300.0, 24200: 100.0}
+        walls: OIWallLevels = oi_wall_levels(call, put, 24000.0)
+        assert walls.resistance == [24100.0, 24150.0]
+        assert walls.support == [23850.0, 23950.0]
+        assert walls.max_pain is not None
+
+    def test_relative_threshold_filters_weak_walls(self) -> None:
+        call = {24100: 900.0, 24150: 100.0, 24200: 80.0, 24250: 60.0, 24300: 40.0}
+        put = {23900: 700.0, 23850: 200.0, 23800: 150.0, 23750: 100.0, 23700: 50.0}
+        walls = oi_wall_levels(call, put, 24000.0, walls_per_side=3)
+        # only strikes >= 50% of the max OI on that side qualify
+        assert walls.resistance == [24100.0]
+        assert walls.support == [23900.0]
+
+    def test_max_pain_is_highest_combined(self) -> None:
+        call = {23950: 100.0, 24000: 500.0, 24100: 900.0, 24200: 300.0, 24250: 100.0}
+        put = {23950: 100.0, 24000: 700.0, 24100: 200.0, 24200: 600.0, 24250: 100.0}
+        walls = oi_wall_levels(call, put, 24050.0)
+        assert walls.max_pain == 24000.0  # combined 1200 > 1100 > 900
+
+    def test_too_few_strikes_returns_empty(self) -> None:
+        call = {24100: 900.0}
+        put = {23900: 700.0}
+        walls = oi_wall_levels(call, put, 24000.0)
+        assert walls.resistance == [] and walls.support == [] and walls.max_pain is None
+
+    def test_empty_oi_returns_empty(self) -> None:
+        walls = oi_wall_levels({}, {}, 24000.0)
+        assert walls == OIWallLevels([], [], None)
+
+    def test_ordered_levels_sorted(self) -> None:
+        call = {24100: 900.0, 24150: 800.0, 24200: 400.0, 24250: 300.0, 24300: 200.0}
+        put = {23950: 700.0, 23900: 600.0, 23850: 500.0, 23800: 400.0, 23750: 300.0}
+        walls = oi_wall_levels(call, put, 24000.0, walls_per_side=2)
+        levels = walls.ordered_levels()
+        assert levels == sorted(levels)
 
 
 class TestHelpers:
@@ -143,3 +187,52 @@ class TestPreMarketEngine:
         engine, _, _ = self._make_engine()
         text = engine.report_text()
         assert "No prior-session data" in text
+
+    def _seed_levels(self, mgr: RedisManager) -> PreMarketEngine:
+        mgr.push_spot_tick({"price": 23800, "ts_epoch": 1.0})
+        mgr.push_spot_tick({"price": 24200, "ts_epoch": 2.0})
+        mgr.push_spot_tick({"price": 24000, "ts_epoch": 3.0})
+        mgr.set_strikes([23900, 24000, 24100, 24200, 24300])
+        mgr.push_call_oi(23900, 150.0)
+        mgr.push_put_oi(23900, 950.0)
+        mgr.push_call_oi(24000, 300.0)
+        mgr.push_put_oi(24000, 180.0)
+        mgr.push_call_oi(24100, 900.0)
+        mgr.push_put_oi(24100, 200.0)
+        mgr.push_call_oi(24200, 250.0)
+        mgr.push_put_oi(24200, 120.0)
+        mgr.push_call_oi(24300, 100.0)
+        mgr.push_put_oi(24300, 100.0)
+        engine = PreMarketEngine(types.SimpleNamespace(), redis=mgr)
+        engine.run()
+        return engine
+
+    def test_refresh_intraday_preserves_pivot_and_adds_walls(self) -> None:
+        engine, mgr, _ = self._make_engine()
+        engine = self._seed_levels(mgr)
+        pivot_before = engine.last_result["pivot"]
+
+        # OI profile has shifted intraday: fresh heavy Call OI at 24200 + Put at 23900
+        result = engine.refresh_intraday()
+        assert result["pivot"] == pivot_before  # structural levels untouched
+        assert result["oi_walls"]["resistance"]
+        assert result["oi_walls"]["support"]
+        stored = mgr.get_pre_market_levels()
+        assert stored is not None and "oi_walls" in stored
+
+    def test_refresh_intraday_without_levels_falls_back_to_run(self) -> None:
+        engine, mgr, _ = self._make_engine()
+        mgr.push_spot_tick({"price": 23800, "ts_epoch": 1.0})
+        mgr.push_spot_tick({"price": 24200, "ts_epoch": 2.0})
+        mgr.push_spot_tick({"price": 24000, "ts_epoch": 3.0})
+        result = engine.refresh_intraday()
+        assert result.get("pivot") is not None  # fell back to a full run
+
+    def test_report_text_includes_oi_walls(self) -> None:
+        engine, mgr, _ = self._make_engine()
+        engine = self._seed_levels(mgr)
+        engine.refresh_intraday()
+        text = engine.report_text()
+        assert "OI Resistance" in text
+        assert "OI Support" in text
+        assert "Updated:" in text

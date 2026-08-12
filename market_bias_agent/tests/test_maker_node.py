@@ -101,6 +101,21 @@ def test_build_maker_prompt_includes_premarket_sr_fan() -> None:
     assert "MAX_PAIN zone = 24,088.0 – 24,112.0" in prompt
 
 
+def test_build_maker_prompt_includes_oi_walls() -> None:
+    prompt = build_maker_prompt(
+        {
+            "pcr": 1.05,
+            "spot": 24100.0,
+            "premarket_oi_resistance": [24200.0, 24250.0],
+            "premarket_oi_support": [24000.0, 23950.0],
+            "premarket_oi_max_pain": 24100.0,
+        },
+        None,
+    )
+    assert "Live OI resistance (call walls): 24,200, 24,250" in prompt
+    assert "Live OI support (put walls): 24,000, 23,950" in prompt
+
+
 def test_build_maker_prompt_no_premarket_when_absent() -> None:
     prompt = build_maker_prompt({"pcr": 1.05, "spot": 23500.0}, None)
     assert "No premarket S/R levels available." in prompt

@@ -19,10 +19,12 @@ from config.constants import KEY_PRE_MARKET_LEVELS
 from config.settings import Settings
 from core.logger import get_logger
 from core.premarket_levels import (
+    OIWallLevels,
     PreMarketLevelsError,
     combined_oi_by_strike,
     compute_pivot_sr,
     max_pain_zone,
+    oi_wall_levels,
     psychological_levels_around,
     session_bounds_from_ticks,
 )
@@ -71,9 +73,12 @@ class PreMarketEngine:
         psych = psychological_levels_around(close)
         levels["psych_levels"] = psych
 
-        pain = self._max_pain_summary(redis)
+        pain = self._max_pain_summary(redis, close)
         if pain:
             levels["max_pain"] = pain
+        walls = self._oi_walls_summary(redis, close)
+        if walls:
+            levels["oi_walls"] = walls
 
         redis.set_pre_market_levels(levels)
         self.last_result = levels
@@ -85,6 +90,43 @@ class PreMarketEngine:
                 "r1": levels["r1"],
                 "s1": levels["s1"],
                 "max_pain": pain.get("strike") if pain else None,
+            },
+        )
+        return levels
+
+    def refresh_intraday(self) -> dict[str, Any]:
+        """Recompute live OI-profile levels (walls + max pain) during the session.
+
+        Pivot S/R stays as computed at premarket (structural, static). Only the
+        OI-based fields are refreshed from the live OI buffers and merged into
+        the existing Redis dict so the signal engine always reads fresh levels.
+        """
+        redis = self._redis or self._get_redis()
+        levels = self._read_levels(redis)
+        if not levels:
+            return self.run()
+        spot = self._last_spot(redis)
+        if spot is None:
+            return levels
+        pain = self._max_pain_summary(redis, spot)
+        walls = self._oi_walls_summary(redis, spot)
+        levels["computed_at_ist"] = iso_ist(now_ist())
+        if pain:
+            levels["max_pain"] = pain
+        else:
+            levels.pop("max_pain", None)
+        if walls:
+            levels["oi_walls"] = walls
+        else:
+            levels.pop("oi_walls", None)
+        redis.set_pre_market_levels(levels)
+        self.last_result = levels
+        log.info(
+            "premarket_levels_refreshed",
+            extra={
+                "max_pain": pain.get("strike") if pain else None,
+                "oi_resistance": walls.get("resistance") if walls else None,
+                "oi_support": walls.get("support") if walls else None,
             },
         )
         return levels
@@ -112,13 +154,39 @@ class PreMarketEngine:
             else:
                 zone_txt = ""
             lines.append(f"Max Pain: {pain.get('strike', 0.0):,.0f}{zone_txt}")
+        walls = levels.get("oi_walls")
+        if isinstance(walls, dict):
+            resistance = walls.get("resistance") or []
+            support = walls.get("support") or []
+            if resistance:
+                lines.append("OI Resistance: " + ", ".join(f"{lv:,.0f}" for lv in resistance))
+            if support:
+                lines.append("OI Support: " + ", ".join(f"{lv:,.0f}" for lv in support))
+        lines.append(f"Updated: {levels.get('computed_at_ist', '')}")
         return "\n".join(lines)
 
-    def _max_pain_summary(self, redis: RedisManager) -> dict[str, Any] | None:
-        """Max pain from per-strike Call/Put OI windows (best-effort)."""
+    def _read_levels(self, redis: RedisManager) -> dict[str, Any]:
+        try:
+            stored = redis.get_pre_market_levels()
+            return dict(stored) if isinstance(stored, dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("premarket_levels_read_failed", extra={"error": str(exc)})
+            return {}
+
+    def _last_spot(self, redis: RedisManager) -> float | None:
+        ticks = redis.get_spot_ticks()
+        for tick in reversed(ticks):
+            price = tick.get("price")
+            if price is not None:
+                try:
+                    return float(price)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    def _oi_by_side(self, redis: RedisManager) -> tuple[dict[int, float], dict[int, float]]:
+        """Latest per-strike Call/Put OI from the live intraday buffers."""
         strikes = redis.get_strikes()
-        if not strikes:
-            return None
         call_oi: dict[int, float] = {}
         put_oi: dict[int, float] = {}
         for strike in strikes:
@@ -128,6 +196,11 @@ class PreMarketEngine:
                 call_oi[strike] = call_window[-1]
             if put_window:
                 put_oi[strike] = put_window[-1]
+        return call_oi, put_oi
+
+    def _max_pain_summary(self, redis: RedisManager, spot: float) -> dict[str, Any] | None:
+        """Max pain from per-strike Call/Put OI windows (best-effort)."""
+        call_oi, put_oi = self._oi_by_side(redis)
         if not call_oi and not put_oi:
             return None
         combined = combined_oi_by_strike(call_oi, put_oi)
@@ -137,6 +210,19 @@ class PreMarketEngine:
         return {
             "strike": int(max(combined, key=lambda s: combined[s])),
             "zone": [round(zone[0], 2), round(zone[1], 2)],
+        }
+
+    def _oi_walls_summary(self, redis: RedisManager, spot: float) -> dict[str, Any] | None:
+        """Live OI-profile S/R walls (call walls = resistance, put walls = support)."""
+        call_oi, put_oi = self._oi_by_side(redis)
+        walls: OIWallLevels = oi_wall_levels(call_oi, put_oi, spot)
+        if not walls.resistance and not walls.support and walls.max_pain is None:
+            return None
+        return {
+            "resistance": [round(lv, 2) for lv in walls.resistance],
+            "support": [round(lv, 2) for lv in walls.support],
+            "max_pain": round(walls.max_pain, 2) if walls.max_pain is not None else None,
+            "computed_at_ist": iso_ist(now_ist()),
         }
 
     def _get_redis(self) -> RedisManager:

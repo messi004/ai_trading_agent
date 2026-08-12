@@ -257,6 +257,11 @@ class SignalEngine:
                     bucket = levels.get(key)
                     if isinstance(bucket, list | tuple) and bucket:
                         return min(bucket, key=lambda lv: abs(float(lv) - spot))
+                oi_walls = levels.get("oi_walls")
+                if isinstance(oi_walls, dict):
+                    wall_levels = [*oi_walls.get("resistance", []), *oi_walls.get("support", [])]
+                    if wall_levels:
+                        return min(wall_levels, key=lambda lv: abs(float(lv) - spot))
                 for level_key in ("r1", "s1", "r2", "s2", "pivot", "max_pain"):
                     if level_key in levels:
                         return float(levels[level_key])
@@ -297,6 +302,26 @@ class SignalEngine:
                     round(float(zone[0]), 2),
                     round(float(zone[1]), 2),
                 ]
+        walls = levels.get("oi_walls")
+        if isinstance(walls, dict):
+            resistance = walls.get("resistance")
+            if isinstance(resistance, list | tuple):
+                try:
+                    ctx["premarket_oi_resistance"] = [round(float(lv), 2) for lv in resistance]
+                except (TypeError, ValueError):
+                    pass
+            support = walls.get("support")
+            if isinstance(support, list | tuple):
+                try:
+                    ctx["premarket_oi_support"] = [round(float(lv), 2) for lv in support]
+                except (TypeError, ValueError):
+                    pass
+            wall_pain = walls.get("max_pain")
+            if wall_pain is not None:
+                try:
+                    ctx["premarket_oi_max_pain"] = round(float(wall_pain), 2)
+                except (TypeError, ValueError):
+                    pass
         return ctx
 
     def _premarket_level_list(self) -> list[float]:
@@ -314,6 +339,11 @@ class SignalEngine:
                 levels.append(float(ctx[key]))
         if "premarket_max_pain" in ctx:
             levels.append(float(ctx["premarket_max_pain"]))
+        for key in ("premarket_oi_resistance", "premarket_oi_support"):
+            if key in ctx:
+                levels.extend(float(lv) for lv in ctx[key])
+        if "premarket_oi_max_pain" in ctx:
+            levels.append(float(ctx["premarket_oi_max_pain"]))
         return levels
 
     def _atm_strike(self, spot: float) -> float:

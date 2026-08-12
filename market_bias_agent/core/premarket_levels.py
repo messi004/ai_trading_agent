@@ -19,7 +19,13 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from config.constants import MAX_PAIN_PINNING_TOLERANCE, S_R_LEVEL_ROUND_BASE
+from config.constants import (
+    MAX_PAIN_PINNING_TOLERANCE,
+    OI_LEVEL_MIN_STRIKES,
+    OI_WALL_MIN_RELATIVE_OI,
+    OI_WALLS_PER_SIDE,
+    S_R_LEVEL_ROUND_BASE,
+)
 
 
 class PreMarketLevelsError(ValueError):
@@ -126,6 +132,90 @@ def max_pain_zone(
     if strike is None:
         return None
     return (strike - tolerance, strike + tolerance)
+
+
+@dataclass(frozen=True)
+class OIWallLevels:
+    """Live intraday S/R walls derived from option-chain OI concentration.
+
+    * ``resistance`` — strikes with the heaviest Call OI above spot (call walls)
+    * ``support`` — strikes with the heaviest Put OI below spot (put walls)
+    * ``max_pain`` — strike with the highest combined Call+Put OI
+
+    Levels are strike prices (50-spaced for Nifty index options), ascending.
+    """
+
+    resistance: list[float]
+    support: list[float]
+    max_pain: float | None
+
+    def ordered_levels(self) -> list[float]:
+        """All walls + max-pain strike, sorted ascending."""
+        levels = [*self.resistance, *self.support]
+        if self.max_pain is not None:
+            levels.append(self.max_pain)
+        return sorted(set(levels))
+
+
+def _top_walls(
+    oi: dict[int, float],
+    spot: float,
+    *,
+    direction: int,
+    walls: int,
+    min_relative: float,
+) -> list[float]:
+    """Top-N strongest OI walls on one side of spot.
+
+    ``direction > 0`` looks above spot (Call walls -> resistance);
+    ``direction < 0`` looks below spot (Put walls -> support). A wall must
+    carry at least ``min_relative`` (fraction 0..1) of the max OI on that side
+    to be considered significant, which filters out low-volume noise strikes.
+    """
+    if not oi:
+        return []
+    candidates = [
+        (s, v) for s, v in oi.items() if v > 0 and (s > spot if direction > 0 else s < spot)
+    ]
+    if not candidates:
+        return []
+    max_oi = max(v for _, v in candidates)
+    threshold = max_oi * min_relative
+    strong = sorted((s for s, v in candidates if v >= threshold), key=lambda s: -oi[s])[:walls]
+    return sorted(float(s) for s in strong)
+
+
+def oi_wall_levels(
+    call_oi: dict[int, float],
+    put_oi: dict[int, float],
+    spot: float,
+    *,
+    walls_per_side: int = OI_WALLS_PER_SIDE,
+    min_relative: float = OI_WALL_MIN_RELATIVE_OI,
+    min_strikes: int = OI_LEVEL_MIN_STRIKES,
+) -> OIWallLevels:
+    """Live S/R walls + max pain from per-strike OI, 50-spaced.
+
+    Returns empty walls when fewer than ``min_strikes`` strikes carry OI
+    (before market open / first minutes of a session the profile is unreliable).
+    """
+    call_oi = {s: v for s, v in call_oi.items() if v > 0}
+    put_oi = {s: v for s, v in put_oi.items() if v > 0}
+    combined = combined_oi_by_strike(call_oi, put_oi)
+    if len(combined) < min_strikes:
+        return OIWallLevels([], [], None)
+    max_pain = find_max_pain_strike(combined)
+    resistance = _top_walls(
+        call_oi, spot, direction=1, walls=walls_per_side, min_relative=min_relative
+    )
+    support = _top_walls(
+        put_oi, spot, direction=-1, walls=walls_per_side, min_relative=min_relative
+    )
+    return OIWallLevels(
+        resistance=resistance,
+        support=support,
+        max_pain=float(max_pain) if max_pain is not None else None,
+    )
 
 
 def psychological_levels_around(

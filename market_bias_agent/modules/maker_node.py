@@ -107,7 +107,7 @@ def _institutional_context_text(features: dict[str, Any]) -> str:
 
 
 def _premarket_context_text(features: dict[str, Any]) -> str:
-    """Structured next-day S/R fan + max-pain pinning band for the prompt."""
+    """Structured S/R fan + live OI-profile walls + max-pain band for the prompt."""
     keys = (
         "premarket_pivot",
         "premarket_r1",
@@ -118,7 +118,9 @@ def _premarket_context_text(features: dict[str, Any]) -> str:
     )
     present = [(k, features.get(k)) for k in keys if features.get(k) is not None]
     zone = features.get("premarket_max_pain_zone")
-    if not present and not zone:
+    oi_r = features.get("premarket_oi_resistance")
+    oi_s = features.get("premarket_oi_support")
+    if not present and not zone and not oi_r and not oi_s:
         return "No premarket S/R levels available."
     lines = ["Premarket S/R fan (from previous session):"]
     for key, value in present:
@@ -126,9 +128,13 @@ def _premarket_context_text(features: dict[str, Any]) -> str:
         lines.append(f"  • {label} = {value:,.1f}")
     if zone:
         lines.append(f"  • MAX_PAIN zone = {zone[0]:,.1f} – {zone[1]:,.1f}")
+    if oi_r:
+        lines.append("Live OI resistance (call walls): " + ", ".join(f"{lv:,.0f}" for lv in oi_r))
+    if oi_s:
+        lines.append("Live OI support (put walls): " + ", ".join(f"{lv:,.0f}" for lv in oi_s))
     lines.append(
-        "The S/R fan marks likely rejection/bounce zones for the session — "
-        "weight price action around these levels."
+        "The S/R fan marks likely rejection/bounce zones; OI walls show where "
+        "option writers currently defend price. Weight price action around both."
     )
     return "\n".join(lines)
 

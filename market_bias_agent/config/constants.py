@@ -257,6 +257,16 @@ KEY_EOD_STRUCTURAL_BIAS = "eod_structural_bias"
 EOD_STRUCTURAL_BIAS_TTL_SECONDS = 30 * 3600
 MAX_PAIN_PINNING_TOLERANCE = 12.0  # |spot - max_pain| band used by live engine
 S_R_LEVEL_ROUND_BASE = 100  # psychological level spacing (24000, 24100, ...)
+# Intraday OI-profile walls (live S/R from option-chain OI concentration).
+# Call walls = resistance above spot; Put walls = support below spot.
+# Strikes are spaced 50 apart for Nifty index options.
+OI_WALLS_PER_SIDE = 2  # top-N OI walls above (resistance) and below (support) spot
+OI_LEVEL_MIN_STRIKES = 5  # need at least this many strikes with OI to compute walls
+OI_WALL_MIN_RELATIVE_OI = 0.5  # a wall must carry >= 50% of the max OI on its side
+OI_STRIKE_SPACING = 50  # Nifty index-option strike spacing
+PREMARKET_REFRESH_INTERVAL_MINUTES = 10  # intraday OI-level refresh cadence
+PREMARKET_REFRESH_CRON_HOUR_IST = 9  # first intraday refresh after market open
+PREMARKET_REFRESH_CRON_MINUTE_IST = 20  # 09:20 IST (lets OI buffers fill first)
 
 # ---------------------------------------------------------------------------
 # Trigger threshold profiles (scaled from PRD baseline)

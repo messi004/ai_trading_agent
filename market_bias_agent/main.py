@@ -20,6 +20,8 @@ from config.constants import (
     EOD_CRON_MINUTE_IST,
     PREMARKET_CRON_HOUR_IST,
     PREMARKET_CRON_MINUTE_IST,
+    PREMARKET_REFRESH_CRON_HOUR_IST,
+    PREMARKET_REFRESH_INTERVAL_MINUTES,
     SESSION_REFRESH_CRON_HOUR_IST,
     SESSION_REFRESH_CRON_MINUTE_IST,
 )
@@ -50,6 +52,7 @@ from modules.premarket_engine import PreMarketEngine
 from modules.signal_engine import SignalEngine
 from utils.telegram_bot import TelegramBot
 from utils.telegram_listener import build_telegram_listener
+from utils.time_utils import market_status
 
 log = get_logger(__name__)
 
@@ -116,6 +119,17 @@ def _run_premarket() -> None:
         log.error("premarket_cron_failed", extra={"error": str(exc)})
 
 
+def _run_premarket_refresh() -> None:
+    """Intraday refresh of OI-profile levels (walls + max pain) during the session."""
+    if market_status() != "OPEN":
+        return
+    try:
+        premarket.refresh_intraday()
+        health.record_cron_success("premarket_refresh")
+    except Exception as exc:  # noqa: BLE001
+        log.error("premarket_refresh_failed", extra={"error": str(exc)})
+
+
 def _run_backtest_report(**kwargs: Any) -> str:
     """Backtest worker for the Telegram /backtest command (runs in a thread)."""
     from modules.backtest_runner import run_backtest_report
@@ -147,6 +161,15 @@ def _start_cron() -> None:
         _run_premarket,
         CronTrigger(hour=PREMARKET_CRON_HOUR_IST, minute=PREMARKET_CRON_MINUTE_IST),
         id="premarket",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_premarket_refresh,
+        CronTrigger(
+            hour=f"{PREMARKET_REFRESH_CRON_HOUR_IST}-15",
+            minute=f"*/{PREMARKET_REFRESH_INTERVAL_MINUTES}",
+        ),
+        id="premarket-refresh",
         replace_existing=True,
     )
     scheduler.add_job(
