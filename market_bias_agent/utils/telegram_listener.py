@@ -98,6 +98,7 @@ class TelegramSessionListener:
         self._ops_chat_id = settings.telegram_ops_chat_id or ""
         self._client = httpx.Client(timeout=TELEGRAM_GETUPDATES_TIMEOUT + 10)
         self._offset = 0
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
     # Long-polling
@@ -107,12 +108,15 @@ class TelegramSessionListener:
         if not self._token or not self._ops_chat_id:
             log.warning("telegram_listener_not_configured")
             return
+        self._loop = asyncio.get_running_loop()
         log.info("telegram_listener_started")
         while True:
             try:
                 updates = await asyncio.to_thread(self._poll_once)
                 for update in updates or []:
-                    self._handle_update(update)
+                    # Handle off-loop: blocking commands (premarket/session/daily)
+                    # must never stall polling or the live pipeline event loop.
+                    self._loop.create_task(asyncio.to_thread(self._handle_update, update))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - polling must survive hiccups
@@ -252,7 +256,11 @@ class TelegramSessionListener:
         self._reply(f"Session updated. user={summary['user_id']} token_age={age_text}", chat_id)
         if self._on_session_updated is not None:
             try:
-                self._on_session_updated()
+                # Handler runs in a worker thread; hop back to the event loop.
+                if self._loop is not None and self._loop.is_running():
+                    self._loop.call_soon_threadsafe(self._on_session_updated)
+                else:
+                    self._on_session_updated()
             except Exception as exc:  # noqa: BLE001 - callback must not break the listener
                 log.warning("session_updated_callback_failed", extra={"error": str(exc)})
 
@@ -278,11 +286,7 @@ class TelegramSessionListener:
             self._reply("Backtest runner not configured on this instance.", chat_id)
             return
         self._reply("⏳ Running backtest on real ingested data… (may take a minute)", chat_id)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._reply("Backtest command needs the async event loop.", chat_id)
-            return
+        loop = self._loop or asyncio.get_event_loop()
         loop.create_task(self._run_backtest(kwargs, chat_id))
 
     async def _run_backtest(self, kwargs: dict[str, Any], chat_id: str) -> None:

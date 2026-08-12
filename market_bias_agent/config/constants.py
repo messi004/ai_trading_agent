@@ -174,7 +174,7 @@ BREEZE_HISTORY_INTERVAL = "1minute"  # historical candle interval for ingest_his
 
 # Telegram session listener (getUpdates long-polling)
 TELEGRAM_GETUPDATES_TIMEOUT = 50  # seconds, matches Bot API long-poll
-TELEGRAM_POLL_INTERVAL_SECONDS = 2.0
+TELEGRAM_POLL_INTERVAL_SECONDS = 0.5
 
 # ---------------------------------------------------------------------------
 # Advanced feature engine (Enhancement Phase 2)
