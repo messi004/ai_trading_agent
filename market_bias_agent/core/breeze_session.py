@@ -341,11 +341,16 @@ class BreezeSessionManager:
     def get_client(self) -> Any:
         """Return a ready BreezeConnect client (bootstrap / reuse).
 
-        Falls back to a Redis-cached token if the process-level one is empty.
+        Prefers the freshest known token: a process-level one set by an
+        explicit ``update_session_token`` beats the cached Redis token, and the
+        Redis token beats the stale boot-time ``.env`` value.
         """
         if self._client is not None:
             return self._client
-        token = self._session_token or self._load_cached_token() or ""
+        cached = self._load_cached_token()
+        if cached:
+            self._session_token = cached
+        token = self._session_token or cached or ""
         if not token:
             if self.has_credentials:
                 return self._build_client(self.auto_login())

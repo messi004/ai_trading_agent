@@ -85,7 +85,18 @@ class BreezeWsTransport:
         if self._client is None:
             self._client = self._session.get_client()
         self._client.on_ticks = self._on_ticks
-        self._client.ws_connect()
+        self._reset_sdk_handler(self._client)
+        try:
+            self._client.ws_connect()
+        except Exception:
+            # SDK ws_connect() assigns sio_handler *before* connecting; a
+            # failed connect leaves a half-initialised handler in place, and a
+            # later ws_connect() then sees `if not self.sio_handler` and never
+            # reconnects -> every retry dies with "is not a connected
+            # namespace.". Clear it so the next attempt starts fresh.
+            self._reset_sdk_handler(self._client)
+            raise
+        self._drain_queue()
         expiry = self._active_expiry()
         log.warning(
             "breeze_transport_connecting",
@@ -94,6 +105,18 @@ class BreezeWsTransport:
         for sub in subscriptions:
             self._subscribe(sub, expiry)
         log.info("breeze_transport_connected", extra={"subscriptions": len(self._token_meta)})
+
+    def _drain_queue(self) -> None:
+        """Drop stale items (esp. the close() None sentinel) from a prior cycle.
+
+        Otherwise the first receive() after reconnect returns the leftover None
+        and the receive loop ends immediately, causing a spurious reconnect.
+        """
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:  # pragma: no cover - racing consumer
+                break
 
     async def receive(self) -> dict[str, Any] | None:
         if self._closed and self._queue.empty():
@@ -115,8 +138,30 @@ class BreezeWsTransport:
                 client.ws_disconnect()
             except Exception as exc:  # noqa: BLE001 - SDK disconnect is best-effort
                 log.warning("breeze_transport_disconnect_error", extra={"error": str(exc)})
+            self._reset_sdk_handler(client)
         self._queue.put_nowait(None)
         log.info("breeze_transport_closed")
+
+    @staticmethod
+    def _reset_sdk_handler(client: Any) -> None:
+        """Force a fresh SDK socket on the next ws_connect().
+
+        SDK bug: ws_disconnect() only emits a "disconnect" event; it neither
+        closes the socket nor clears sio_handler. Worse, ws_connect() assigns
+        sio_handler *before* connecting, so a failed connect leaves a
+        half-initialised handler that makes every later ws_connect() a silent
+        no-op (emits then fail with "/ is not a connected namespace."). Reset
+        best-effort so the next connect() always builds a brand-new socket.
+        """
+        try:
+            handler = getattr(client, "sio_handler", None)
+            if handler is not None:
+                old_sio = getattr(handler, "sio", None)
+                client.sio_handler = None
+                if old_sio is not None:
+                    old_sio.disconnect()  # stop the stale socket's thread
+        except Exception as exc:  # noqa: BLE001 - best-effort reset
+            log.warning("breeze_transport_handler_reset_failed", extra={"error": str(exc)})
 
     # ------------------------------------------------------------------
     # Subscription helpers

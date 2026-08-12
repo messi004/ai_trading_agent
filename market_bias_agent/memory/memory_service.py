@@ -21,7 +21,7 @@ from config.constants import (
 from config.settings import Settings
 from core.logger import get_logger
 from memory.embeddings import Embedder, get_embedder
-from memory.trap_records import TrapRecord, parse_subsequent_move_points
+from memory.trap_records import TrapRecord, compute_market_state, parse_subsequent_move_points
 from memory.vector_store import (
     MemoryVectorStore,
     QdrantVectorStore,
@@ -86,7 +86,7 @@ class MemoryService:
         self._settings = settings
         self._store = store or get_vector_store(settings)
         self._embedder = embedder or get_embedder(settings)
-        self._store.ensure_collection()
+        self._store.ensure_collection(dim=self._embedder.dim)
 
     # ------------------------------------------------------------------
     # Indexing
@@ -133,7 +133,9 @@ class MemoryService:
         regime: str | None = None,
     ) -> SimilarSituation:
         """Top-K similar traps in the same expiry-week band, regime-boosted."""
-        query_vector = self._embedder.embed({"features": features})
+        query_vector = self._embedder.embed(
+            {"features": features, "market_state": compute_market_state(features)}
+        )
         hits = self._store.search(
             query_vector,
             limit=max(limit, 1),

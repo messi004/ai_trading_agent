@@ -181,6 +181,7 @@ class QdrantVectorStore:
                 port=self._settings.qdrant_port,
                 api_key=self._settings.qdrant_api_key or None,
                 timeout=self._timeout,
+                https=self._settings.qdrant_https,
             )
         return self._client
 
@@ -189,6 +190,14 @@ class QdrantVectorStore:
 
         collections = [c.name for c in self._qdrant.get_collections().collections]
         if self._collection in collections:
+            info = self._qdrant.get_collection(self._collection)
+            existing_dim = info.config.params.vectors.size
+            if existing_dim != dim:
+                raise ValueError(
+                    f"Qdrant collection {self._collection!r} dimension {existing_dim} "
+                    f"does not match embedder dimension {dim}. Recreate the collection "
+                    f"at {dim} or change EMBEDDING_BACKEND."
+                )
             self._ensure_payload_indexes()
             return
         self._qdrant.create_collection(
@@ -225,7 +234,7 @@ class QdrantVectorStore:
     def upsert(self, records: list[TrapRecord], embedder: Embedder) -> list[str]:
         from qdrant_client.http import models as qm
 
-        self.ensure_collection()
+        self.ensure_collection(dim=embedder.dim)
         ids: list[str] = []
         for start in range(0, len(records), QDRANT_BATCH_SIZE):
             batch = records[start : start + QDRANT_BATCH_SIZE]
@@ -249,7 +258,7 @@ class QdrantVectorStore:
         limit: int = 5,
         filter_payload: dict[str, Any] | None = None,
     ) -> list[SearchHit]:
-        self.ensure_collection()
+        self.ensure_collection(dim=len(query_vector))
         points = self._qdrant.search(
             collection_name=self._collection,
             query_vector=query_vector,

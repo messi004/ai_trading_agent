@@ -23,6 +23,7 @@ from config.constants import (
 )
 from config.settings import Settings
 from core.logger import get_logger
+from utils.time_utils import market_status
 
 log = get_logger(__name__)
 
@@ -115,9 +116,17 @@ class BreezeWebSocketClient:
             except Exception as exc:  # noqa: BLE001
                 log.error("backfill_failed", extra={"error": str(exc)})
 
-    async def _watchdog_expired(self) -> bool:
-        """True if no tick received for the idle window while supposedly open."""
+    async def _watchdog_expired(self, market: str | None = None) -> bool:
+        """True if no tick received for the idle window while supposedly open.
+
+        Market-aware like the health watchdog: outside OPEN hours a silent
+        socket is expected (no ticks flow pre/post market), so we must not
+        tear down a healthy connection just because the feed is quiet.
+        `market` overrides the auto-detected PRE/OPEN/POST state (testability).
+        """
         if not self._connected:
+            return False
+        if (market if market is not None else market_status()) != "OPEN":
             return False
         return (time.monotonic() - self._last_tick_time) > TICK_WATCHDOG_IDLE_SECONDS
 
@@ -154,6 +163,7 @@ class BreezeWebSocketClient:
 
     async def _receive_loop(self) -> Any:
         """Yield parsed messages; return (break) when transport closes."""
+        log.warning("debug_receive_loop_enter", extra={"connected": self._connected})
         while not self._stop:
             if await self._watchdog_expired():
                 log.warning(
@@ -167,7 +177,9 @@ class BreezeWebSocketClient:
                     self._transport.receive(), timeout=TICK_WATCHDOG_IDLE_SECONDS
                 )
             except asyncio.TimeoutError:
+                log.warning("debug_receive_loop_timeout")
                 continue
             if raw is None:
+                log.warning("debug_receive_loop_none")
                 return
             yield raw

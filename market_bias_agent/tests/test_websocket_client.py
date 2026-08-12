@@ -94,10 +94,10 @@ async def test_watchdog_expired_detects_stale() -> None:
     client = _client(transport)
     client._connected = True
     client._last_tick_time = 0.0
-    assert await client._watchdog_expired() is True
+    assert await client._watchdog_expired(market="OPEN") is True
 
     client._last_tick_time = time.monotonic()
-    assert await client._watchdog_expired() is False
+    assert await client._watchdog_expired(market="OPEN") is False
 
 
 @pytest.mark.asyncio

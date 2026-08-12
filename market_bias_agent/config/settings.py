@@ -85,6 +85,8 @@ class Settings:
     # Google Gemini (via OpenAI-compatible endpoint)
     gemini_api_key: str = ""
     embedding_model: str = "gemini-embedding-001"
+    # Embedding backend: "feature" (deterministic 8-dim, matches Qdrant) or "gemini".
+    embedding_backend: str = "feature"
     llm_model: str = "gemini-3.5-flash"
     llm_temperature: float = 0.3
 
@@ -104,6 +106,7 @@ class Settings:
     qdrant_port: int = 6333
     qdrant_api_key: str = ""
     qdrant_collection: str = "nifty_historical_traps"
+    qdrant_https: bool = False
 
     # Schedule
     market_open_ist: str = "09:15"
@@ -160,6 +163,7 @@ def get_settings() -> Settings:
         nifty_expiry=_get_str("NIFTY_EXPIRY", "weekly"),
         gemini_api_key=_get_str("GEMINI_API_KEY"),
         embedding_model=_get_str("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
+        embedding_backend=_get_str("EMBEDDING_BACKEND", "feature").lower(),
         llm_model=_get_str("GEMINI_LLM_MODEL", "gemini-3.5-flash"),
         llm_temperature=_get_float("LLM_TEMPERATURE", 0.3),
         telegram_bot_token=_get_str("TELEGRAM_BOT_TOKEN"),
@@ -173,6 +177,7 @@ def get_settings() -> Settings:
         qdrant_port=_get_int("QDRANT_PORT", 6333),
         qdrant_api_key=_get_str("QDRANT_API_KEY"),
         qdrant_collection=_get_str("QDRANT_COLLECTION", "nifty_historical_traps"),
+        qdrant_https=_get_bool("QDRANT_HTTPS", False),
         market_open_ist=_get_str("MARKET_OPEN_IST", "09:15"),
         market_close_ist=_get_str("MARKET_CLOSE_IST", "15:30"),
         threshold_profile=_get_str("THRESHOLD_PROFILE", "MODERATE").upper(),

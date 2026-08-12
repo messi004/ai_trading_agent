@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from config.constants import (
     GEMINI_BASE_URL,
+    GEMINI_EMBEDDING_DIM,
     OI_VELOCITY_SCALE,
     QDRANT_COLLECTION_DIM,
     SPOT_REFERENCE,
@@ -27,6 +28,11 @@ _REGIMES = ("CALM", "ACTIVE", "HIGH_VOL")
 
 class Embedder(Protocol):
     """Turns a trap payload into an embedding vector."""
+
+    @property
+    def dim(self) -> int:
+        """Vector dimension produced by this embedder (must match collection)."""
+        ...
 
     def embed(self, payload: dict[str, Any]) -> list[float]: ...
 
@@ -49,6 +55,10 @@ class FeatureEmbedder:
 
     def __init__(self, dim: int = QDRANT_COLLECTION_DIM) -> None:
         self._dim = dim
+
+    @property
+    def dim(self) -> int:
+        return self._dim
 
     def embed(self, payload: dict[str, Any]) -> list[float]:
         features = payload.get("features") or {}
@@ -80,9 +90,14 @@ class GeminiEmbedder:
             raise ValueError("GeminiEmbedder requires GEMINI_API_KEY")
         self._api_key = api_key
         self._model = model
+        self._dim = GEMINI_EMBEDDING_DIM
         from openai import OpenAI
 
         self._client = OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
+
+    @property
+    def dim(self) -> int:
+        return self._dim
 
     def embed(self, payload: dict[str, Any]) -> list[float]:
         text = payload.get("market_state") or ""
@@ -93,10 +108,24 @@ class GeminiEmbedder:
 
 
 def get_embedder(settings: Settings) -> Embedder:
-    """Prefer the real model when a key exists, else deterministic offline mode."""
-    if settings.gemini_api_key:
-        try:
-            return GeminiEmbedder(settings.gemini_api_key, settings.embedding_model)
-        except Exception:  # noqa: BLE001 - fall back to offline embedding
-            log.warning("gemini_embedder_unavailable_fallback_to_feature")
+    """Select an embedder matching the configured backend.
+
+    Live deployments default to the deterministic `FeatureEmbedder` so the
+    embeddings always match the existing Qdrant collection dimension
+    (`QDRANT_COLLECTION_DIM`). Set `EMBEDDING_BACKEND=gemini` only when the
+    collection is created at `GEMINI_EMBEDDING_DIM`, otherwise Qdrant rejects
+    upserts with "expected dim ... got ...".
+    """
+    backend = (settings.embedding_backend or "feature").lower()
+    if backend == "gemini":
+        if settings.gemini_api_key:
+            try:
+                embedder = GeminiEmbedder(settings.gemini_api_key, settings.embedding_model)
+                log.info("embedder_selected", extra={"backend": "gemini", "dim": embedder.dim})
+                return embedder
+            except Exception:  # noqa: BLE001 - fall back to offline embedding
+                log.warning("gemini_embedder_unavailable_fallback_to_feature")
+        else:
+            log.warning("gemini_backend_without_api_key_fallback_to_feature")
+    log.info("embedder_selected", extra={"backend": "feature", "dim": QDRANT_COLLECTION_DIM})
     return FeatureEmbedder()

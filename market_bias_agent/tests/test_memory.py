@@ -92,6 +92,24 @@ class TestEmbeddings:
         settings = Settings(gemini_api_key="")
         assert isinstance(get_embedder(settings), FeatureEmbedder)
 
+    def test_get_embedder_defaults_to_feature_even_with_key(self) -> None:
+        # GEMINI key present but backend unset -> FeatureEmbedder so Qdrant dim (8) matches.
+        settings = Settings(gemini_api_key="g")
+        embedder = get_embedder(settings)
+        assert isinstance(embedder, FeatureEmbedder)
+        assert embedder.dim == QDRANT_COLLECTION_DIM
+
+    def test_get_embedder_gemini_backend_explicit(self) -> None:
+        # Explicit EMBEDDING_BACKEND=gemini uses GeminiEmbedder when a key exists.
+        settings = Settings(gemini_api_key="g", embedding_backend="gemini")
+        embedder = get_embedder(settings)
+        assert isinstance(embedder, GeminiEmbedder)
+        assert embedder.dim == 3072
+
+    def test_get_embedder_gemini_backend_without_key_falls_back(self) -> None:
+        settings = Settings(gemini_api_key="", embedding_backend="gemini")
+        assert isinstance(get_embedder(settings), FeatureEmbedder)
+
     def test_cosine_similarity(self) -> None:
         assert cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
         assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)

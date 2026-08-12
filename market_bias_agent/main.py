@@ -7,7 +7,9 @@ the websocket pipeline and cron schedulers.
 from __future__ import annotations
 
 import asyncio
+import types
 from contextlib import asynccontextmanager
+from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
@@ -235,6 +237,52 @@ async def lifespan(app: FastAPI):
         settings, session_mgr, notify=telegram.send_ops, on_session_updated=_on_session_updated
     )
     listener_task = asyncio.create_task(listener.run())
+
+    async def _debug_task_dump() -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                for t in asyncio.all_tasks():
+                    if t is asyncio.current_task():
+                        continue
+                    frames = []
+                    try:
+                        for fr in t.get_stack():
+                            code = getattr(fr, "f_code", None) or getattr(fr, "code", None)
+                            if code is None:
+                                continue
+                            frames.append(f"{code.co_filename}:{fr.f_lineno}:{code.co_name}")
+                    except Exception:  # noqa: BLE001 - debug only
+                        pass
+                    coro_frames: list[str] = []
+                    cr = getattr(t, "get_coro", lambda: None)()
+                    while cr is not None:
+                        gfr: Any = getattr(cr, "cr_frame", None) or getattr(cr, "ag_frame", None)
+                        if gfr is not None:
+                            coro_frames.append(
+                                f"{gfr.f_code.co_filename}:{gfr.f_lineno}:{gfr.f_code.co_name}"
+                            )
+                        nxt = getattr(cr, "cr_await", None)
+                        if nxt is None:
+                            nxt = getattr(cr, "ag_await", None)
+                        if nxt is not None and not isinstance(
+                            nxt, types.CoroutineType
+                        ) and not isinstance(nxt, types.AsyncGeneratorType):
+                            nxt = None
+                        cr = nxt
+                    log.warning(
+                        "debug_task_dump",
+                        extra={
+                            "task": t.get_name(),
+                            "state": t._state,
+                            "frames": frames,
+                            "coro_chain": coro_frames,
+                        },
+                    )
+            except Exception as exc:  # noqa: BLE001 - debug only
+                log.warning("debug_task_dump_failed", extra={"error": str(exc)})
+
+    debug_task = asyncio.create_task(_debug_task_dump())
     _start_cron()
     try:
         yield
@@ -242,6 +290,7 @@ async def lifespan(app: FastAPI):
         if pipeline_task is not None:
             pipeline_task.cancel()
         listener_task.cancel()
+        debug_task.cancel()
         scheduler.shutdown(wait=False)
         redis_mgr.close()
 
@@ -278,6 +327,7 @@ def status() -> dict:
     )
     page["redis_memory_bytes"] = redis_memory
     page["redis_keys"] = redis_keys
+    page["validation_stats"] = vars(pipeline.stats) if pipeline is not None else {}
     page["premarket_levels"] = premarket.last_result or _premarket_from_redis()
     page["signal_engine"] = signal_engine.stats()
     return page

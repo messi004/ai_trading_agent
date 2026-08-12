@@ -10,7 +10,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from config.constants import MAX_TICK_AGE_SECONDS, TICK_SKEW_TOLERANCE_SECONDS
+from config.constants import (
+    MAX_TICK_AGE_SECONDS,
+    OI_MAX_TICK_AGE_SECONDS,
+    OI_TICK_SKEW_TOLERANCE_SECONDS,
+    TICK_SKEW_TOLERANCE_SECONDS,
+)
 
 
 class TickError(ValueError):
@@ -105,6 +110,10 @@ def is_out_of_order(
         return False
     if tick.symbol != prev_tick.symbol or tick.type != prev_tick.type:
         return False
+    if tick.type == "oi" and (
+        tick.strike != prev_tick.strike or tick.option_type != prev_tick.option_type
+    ):
+        return False
     return (tick.ts_epoch - prev_tick.ts_epoch) > skew_tolerance_seconds
 
 
@@ -113,6 +122,10 @@ def is_duplicate(prev_tick: Tick | None, tick: Tick) -> bool:
     if prev_tick is None:
         return False
     if tick.symbol != prev_tick.symbol or tick.type != prev_tick.type:
+        return False
+    if tick.type == "oi" and (
+        tick.strike != prev_tick.strike or tick.option_type != prev_tick.option_type
+    ):
         return False
     return tick.signature == prev_tick.signature
 
@@ -135,11 +148,15 @@ class TickValidator:
         max_age_seconds: float = MAX_TICK_AGE_SECONDS,
         skew_tolerance_seconds: float = TICK_SKEW_TOLERANCE_SECONDS,
         drop_duplicates: bool = True,
+        oi_max_age_seconds: float = OI_MAX_TICK_AGE_SECONDS,
+        oi_skew_tolerance_seconds: float = OI_TICK_SKEW_TOLERANCE_SECONDS,
     ) -> None:
         self.max_age = max_age_seconds
         self.skew = skew_tolerance_seconds
         self.drop_duplicates = drop_duplicates
-        self._last_by_key: dict[tuple[str, str], Tick] = {}
+        self.oi_max_age = oi_max_age_seconds
+        self.oi_skew = oi_skew_tolerance_seconds
+        self._last_by_key: dict[tuple[str, str, int, str], Tick] = {}
         self.stats = ValidationStats()
 
     def validate(self, raw: dict[str, Any], now: float | None = None) -> Tick | None:
@@ -151,13 +168,24 @@ class TickValidator:
             self.stats.dropped_malformed += 1
             return None
 
-        if is_stale(tick, self.max_age, now):
+        # OI ticks carry `ltt` = last TRADE time, not OI-update time. An
+        # illiquid strike can trade once an hour yet push current OI every
+        # few seconds; treating the trade timestamp as staleness would drop
+        # live OI data. Spot prices, by contrast, only change on trade, so
+        # their age is a faithful freshness signal.
+        if tick.type == "oi":
+            max_age = max(self.max_age, self.oi_max_age)
+            skew = max(self.skew, self.oi_skew)
+        else:
+            max_age, skew = self.max_age, self.skew
+
+        if is_stale(tick, max_age, now):
             self.stats.dropped_stale += 1
             return None
 
-        key = (tick.type, tick.symbol)
+        key = (tick.type, tick.symbol, tick.strike, tick.option_type)
         prev = self._last_by_key.get(key)
-        if is_out_of_order(tick, prev, self.skew):
+        if is_out_of_order(tick, prev, skew):
             self.stats.dropped_out_of_order += 1
             return None
         if self.drop_duplicates and is_duplicate(prev, tick):

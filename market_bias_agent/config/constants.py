@@ -78,6 +78,8 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # Memory intelligence (Enhancement Phase 5)
 # ---------------------------------------------------------------------------
 QDRANT_COLLECTION_DIM = 8  # FeatureEmbedder output dimension
+# Gemini text-embedding-004 / gemini-embedding-001 output dimension (3072).
+GEMINI_EMBEDDING_DIM = 3072  # used when EMBEDDING_BACKEND=gemini
 QDRANT_DISTANCE = "COSINE"
 QDRANT_SIMILAR_LIMIT = 5
 QDRANT_SIMILAR_BOOST = 0.05  # score boost when a boost condition matches
@@ -137,6 +139,11 @@ AUDIT_TRAIL_MAXLEN = 10_000
 # Tick integrity
 MAX_TICK_AGE_SECONDS = 5.0  # drop ticks older than this vs our clock
 TICK_SKEW_TOLERANCE_SECONDS = 2.0  # reject ts jumping forward by more than this vs prev
+# OI ticks carry `ltt` = last TRADE time; an illiquid strike can trade rarely yet
+# push current OI every few seconds. Treating the trade timestamp as staleness or
+# a forward jump would drop live OI data, so OI gets much wider tolerances.
+OI_MAX_TICK_AGE_SECONDS = 3600.0  # drop OI ticks older than this vs our clock
+OI_TICK_SKEW_TOLERANCE_SECONDS = 300.0  # allow up to 5m between same-strike OI ticks
 
 # Watchdog / reconnect
 TICK_WATCHDOG_IDLE_SECONDS = 10.0  # reconnect if no tick in this window
