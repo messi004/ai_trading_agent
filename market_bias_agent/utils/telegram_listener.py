@@ -341,12 +341,7 @@ class TelegramSessionListener:
             )
 
     def _reply_with_menu(self, chat_id: str, text: str, buttons: list[list[dict]]) -> None:
-        if self._notify is not None:
-            try:
-                self._notify(text)
-                return
-            except Exception as exc:  # noqa: BLE001
-                log.warning("telegram_reply_failed", extra={"error": str(exc)})
+        # Menus MUST carry reply_markup, so send directly (notify has no keyboard).
         self._send_text(chat_id, text, reply_markup={"inline_keyboard": buttons})
 
     def _reply(self, text: str, chat_id: str) -> None:

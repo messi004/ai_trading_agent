@@ -168,9 +168,13 @@ def test_backtest_command_runs_runner_and_replies() -> None:
 
 
 def test_backtest_command_no_args_shows_menu() -> None:
-    listener, _session, bot = _listener()
+    listener, _session, _bot = _listener()
+    _fake_http_client(listener)
     listener._handle_update({"message": {"text": "/backtest", "chat": {"id": "12345"}}})
-    assert bot.sent and "Backtest" in bot.sent[0][1]
+    assert listener._captured_posts
+    last = listener._captured_posts[-1]["json"]
+    assert "Backtest" in last["text"]
+    assert last["reply_markup"]["inline_keyboard"]
 
 
 def test_backtest_command_unconfigured_replies_hint() -> None:
@@ -203,15 +207,23 @@ def test_backtest_reports_value_error_to_operator() -> None:
 
 def _fake_http_client(listener: TelegramSessionListener) -> None:
     """Short-circuit the real Bot API client so tests stay hermetic."""
-    listener._client.post = lambda *_args, **_kwargs: types.SimpleNamespace(  # type: ignore[method-assign]
-        status_code=200, json=lambda: {"ok": True}
-    )
+    listener._captured_posts: list[dict] = []
+
+    def _post(url: str, json: dict | None = None):
+        listener._captured_posts.append({"url": url, "json": json})
+        return types.SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+
+    listener._client.post = _post  # type: ignore[method-assign]
 
 
 def test_start_command_shows_menu() -> None:
-    listener, _session, bot = _listener()
+    listener, _session, _bot = _listener()
+    _fake_http_client(listener)
     listener._handle_update({"message": {"text": "/start", "chat": {"id": "12345"}}})
-    assert bot.sent and "AI Trading Agent" in bot.sent[0][1]
+    assert listener._captured_posts
+    last = listener._captured_posts[-1]["json"]
+    assert "AI Trading Agent" in last["text"]
+    assert last["reply_markup"]["inline_keyboard"]
 
 
 def test_premarket_command_replies_report() -> None:
@@ -269,12 +281,15 @@ def test_callback_backtest_range_runs_runner() -> None:
 
 
 def test_callback_backtest_menu_replies_menu() -> None:
-    listener, _session, bot = _listener()
+    listener, _session, _bot = _listener()
     _fake_http_client(listener)
     listener._handle_update(
         {"callback_query": {"id": "q1", "data": "bt:menu", "message": {"chat": {"id": "12345"}}}}
     )
-    assert bot.sent and "Backtest" in bot.sent[0][1]
+    assert listener._captured_posts
+    last = listener._captured_posts[-1]["json"]
+    assert "Backtest" in last["text"]
+    assert last["reply_markup"]["inline_keyboard"]
 
 
 def test_callback_command_status_replies() -> None:
@@ -287,12 +302,15 @@ def test_callback_command_status_replies() -> None:
 
 
 def test_callback_menu_main_shows_menu() -> None:
-    listener, _session, bot = _listener()
+    listener, _session, _bot = _listener()
     _fake_http_client(listener)
     listener._handle_update(
         {"callback_query": {"id": "q1", "data": "menu:main", "message": {"chat": {"id": "12345"}}}}
     )
-    assert bot.sent and "AI Trading Agent" in bot.sent[0][1]
+    assert listener._captured_posts
+    last = listener._captured_posts[-1]["json"]
+    assert "AI Trading Agent" in last["text"]
+    assert last["reply_markup"]["inline_keyboard"]
 
 
 def test_callback_unknown_chat_ignored() -> None:
