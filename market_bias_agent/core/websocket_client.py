@@ -139,8 +139,12 @@ class BreezeWebSocketClient:
                 attempt = 0
                 async for raw in self._receive_loop():
                     if self._handler is not None:
-                        self._handler(raw)
+                        # Mark tick on receipt (not after processing) so a slow
+                        # signal/LLM step never trips the 10s stale watchdog.
                         self._mark_tick()
+                        # Off-loop: the signal engine calls the LLM synchronously;
+                        # running it on the event loop blocks /health + Telegram.
+                        await asyncio.to_thread(self._handler, raw)
                 # stream ended without exception -> unexpected close
                 raise ConnectionError("websocket stream closed")
             except asyncio.CancelledError:
